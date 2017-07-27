@@ -1142,28 +1142,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
 
         self.connect_fields(self, self.amount_e, self.fiat_send_e, self.fee_e)
 
-        vbox_feelabel = QVBoxLayout()
-        vbox_feelabel.addWidget(self.fee_e_label)
-        vbox_feelabel.addStretch(1)
-        grid.addLayout(vbox_feelabel, 5, 0)
-
-        self.fee_adv_controls = QWidget()
-        hbox = QHBoxLayout(self.fee_adv_controls)
-        hbox.setContentsMargins(0, 0, 0, 0)
-        hbox.addWidget(self.feerate_e)
-        hbox.addWidget(self.size_e)
-        hbox.addWidget(self.fee_e)
-        hbox.addWidget(self.feerounding_icon, Qt.AlignLeft)
-        hbox.addStretch(1)
-
-        vbox_feecontrol = QVBoxLayout()
-        vbox_feecontrol.addWidget(self.fee_adv_controls)
-        vbox_feecontrol.addWidget(self.fee_slider)
-
-        grid.addLayout(vbox_feecontrol, 5, 1, 1, -1)
-
-        if not self.config.get('show_fee', False):
-            self.fee_adv_controls.setVisible(False)
+        grid.addWidget(self.fee_e_label, 5, 0)
+        grid.addWidget(self.fee_slider, 5, 1)
+        grid.addWidget(self.fee_e, 5, 2)
 
         self.preview_button = EnterButton(_("Preview"), self.do_preview)
         self.preview_button.setToolTip(_('Display the details of your transactions before signing it.'))
@@ -1485,11 +1466,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         amount = tx.output_value() if self.is_max else sum(map(lambda x:x[2], outputs))
         fee = tx.get_fee()
 
-        use_rbf = self.config.get('use_rbf', True)
-        if use_rbf:
-            tx.set_rbf(False)
-
-        if fee < self.wallet.relayfee() * tx.estimated_size() / 1000:
+        if fee < self.wallet.relayfee() * tx.estimated_size() / 1000 and tx.requires_fee(self.wallet):
             self.show_error(_("This transaction requires a higher fee, or it will not be propagated by the network"))
             return
 
@@ -2633,17 +2610,6 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         feebox_cb.stateChanged.connect(on_feebox)
         fee_widgets.append((feebox_cb, None))
 
-        use_rbf_cb = QCheckBox(_('Use Replace-By-Fee'))
-        use_rbf_cb.setChecked(self.config.get('use_rbf', True))
-        use_rbf_cb.setToolTip(
-            _('If you check this box, your transactions will be marked as non-final,') + '\n' + \
-            _('and you will have the possiblity, while they are unconfirmed, to replace them with transactions that pay higher fees.') + '\n' + \
-            _('Note that some merchants do not accept non-final transactions until they are confirmed.'))
-        def on_use_rbf(x):
-            self.config.set_key('use_rbf', x == Qt.Checked)
-        use_rbf_cb.stateChanged.connect(on_use_rbf)
-        fee_widgets.append((use_rbf_cb, None))
-
         msg = _('OpenAlias record, used to receive coins and to sign payment requests.') + '\n\n'\
               + _('The following alias providers are available:') + '\n'\
               + '\n'.join(['https://cryptoname.co/', 'http://xmr.link']) + '\n\n'\
@@ -3085,43 +3051,4 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.show_error(_('Max fee exceeded'))
             return
         new_tx = self.wallet.cpfp(parent_tx, fee)
-        new_tx.set_rbf(True)
         self.show_transaction(new_tx)
-
-    def bump_fee_dialog(self, tx):
-        is_relevant, is_mine, v, fee = self.wallet.get_wallet_delta(tx)
-        tx_label = self.wallet.get_label(tx.txid())
-        tx_size = tx.estimated_size()
-        d = WindowModalDialog(self, _('Bump Fee'))
-        vbox = QVBoxLayout(d)
-        vbox.addWidget(QLabel(_('Current fee') + ': %s'% self.format_amount(fee) + ' ' + self.base_unit()))
-        vbox.addWidget(QLabel(_('New fee' + ':')))
-
-        fee_e = BTCAmountEdit(self.get_decimal_point)
-        fee_e.setAmount(fee * 1.5)
-        vbox.addWidget(fee_e)
-
-        def on_rate(dyn, pos, fee_rate):
-            fee = fee_rate * tx_size / 1000
-            fee_e.setAmount(fee)
-        fee_slider = FeeSlider(self, self.config, on_rate)
-        vbox.addWidget(fee_slider)
-        cb = QCheckBox(_('Final'))
-        vbox.addWidget(cb)
-        vbox.addLayout(Buttons(CancelButton(d), OkButton(d)))
-        if not d.exec_():
-            return
-        is_final = cb.isChecked()
-        new_fee = fee_e.get_amount()
-        delta = new_fee - fee
-        if delta < 0:
-            self.show_error("fee too low")
-            return
-        try:
-            new_tx = self.wallet.bump_fee(tx, delta)
-        except BaseException as e:
-            self.show_error(str(e))
-            return
-        if is_final:
-            new_tx.set_rbf(False)
-        self.show_transaction(new_tx, tx_label)
