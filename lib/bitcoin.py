@@ -46,7 +46,6 @@ def read_json(filename, default):
         r = default
     return r
 
-
 class NetworkConstants:
 
     @classmethod
@@ -273,10 +272,6 @@ def seed_type(x):
         return 'old'
     elif is_new_seed(x):
         return 'standard'
-    elif is_new_seed(x, version.SEED_PREFIX_SW):
-        return 'segwit'
-    #elif is_new_seed(x, version.SEED_PREFIX_2FA):
-        #return '2fa'
     return ''
 
 is_seed = lambda x: bool(seed_type(x))
@@ -334,9 +329,6 @@ def hash160_to_p2sh(h160):
 
 def public_key_to_p2pkh(public_key):
     return hash160_to_p2pkh(hash_160(public_key))
-
-def hash_to_segwit_addr(h):
-    return segwit_addr.encode(NetworkConstants.SEGWIT_HRP, 0, h)
 
 def pubkey_to_address(txin_type, pubkey):
     if txin_type == 'p2pkh':
@@ -474,8 +466,6 @@ def DecodeBase58Check(psz):
         return key
 
 
-
-# extended key export format for segwit
 
 SCRIPT_TYPES = {
     'p2pkh':0,
