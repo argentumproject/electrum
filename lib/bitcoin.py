@@ -55,7 +55,6 @@ class NetworkConstants:
         cls.WIF_PREFIX = 0x80
         cls.ADDRTYPE_P2PKH = 23
         cls.ADDRTYPE_P2SH = 5
-        cls.SEGWIT_HRP = "bc"
         cls.GENESIS = "88c667bc63167685e4e4da058fffdfe8e007e5abffd6855de52ad59df7bb0bb2"
         cls.DEFAULT_PORTS = {'t': '50001', 's': '50002'}
         cls.DEFAULT_SERVERS = read_json('servers.json', {})
@@ -63,17 +62,9 @@ class NetworkConstants:
 
         cls.XPRV_HEADERS = {
             'standard':    0x0488ade4,  # xprv
-            'p2wpkh-p2sh': 0x049d7878,  # yprv
-            'p2wsh-p2sh':  0x0295b005,  # Yprv
-            'p2wpkh':      0x04b2430c,  # zprv
-            'p2wsh':       0x02aa7a99,  # Zprv
         }
         cls.XPUB_HEADERS = {
             'standard':    0x0488b21e,  # xpub
-            'p2wpkh-p2sh': 0x049d7cb2,  # ypub
-            'p2wsh-p2sh':  0x0295b43f,  # Ypub
-            'p2wpkh':      0x04b24746,  # zpub
-            'p2wsh':       0x02aa7ed3,  # Zpub
         }
 
     @classmethod
@@ -82,7 +73,6 @@ class NetworkConstants:
         cls.WIF_PREFIX = 0xef
         cls.ADDRTYPE_P2PKH = 88
         cls.ADDRTYPE_P2SH = 188
-        cls.SEGWIT_HRP = "tb"
         cls.GENESIS = "6bee778b0f99ee7a02635bc7de7d2c28f8a844f8c3aa01cb19b02adb9a169461"
         cls.DEFAULT_PORTS = {'t':'51001', 's':'51002'}
         cls.DEFAULT_SERVERS = read_json('servers_testnet.json', {})
@@ -90,17 +80,9 @@ class NetworkConstants:
 
         cls.XPRV_HEADERS = {
             'standard':    0x04358394,  # tprv
-            'p2wpkh-p2sh': 0x044a4e28,  # uprv
-            'p2wsh-p2sh':  0x024285b5,  # Uprv
-            'p2wpkh':      0x045f18bc,  # vprv
-            'p2wsh':       0x02575048,  # Vprv
         }
         cls.XPUB_HEADERS = {
             'standard':    0x043587cf,  # tpub
-            'p2wpkh-p2sh': 0x044a5262,  # upub
-            'p2wsh-p2sh':  0x024285ef,  # Upub
-            'p2wpkh':      0x045f1cf6,  # vpub
-            'p2wsh':       0x02575483,  # Vpub
         }
 
 
@@ -332,7 +314,7 @@ def hash_160(public_key):
         return md.digest()
 
 
-def hash160_to_b58_address(h160, addrtype, witness_program_version=1):
+def hash160_to_b58_address(h160, addrtype):
     s = bytes([addrtype])
     s += h160
     return base_encode(s+Hash(s)[0:4], base=58)
@@ -356,39 +338,15 @@ def public_key_to_p2pkh(public_key):
 def hash_to_segwit_addr(h):
     return segwit_addr.encode(NetworkConstants.SEGWIT_HRP, 0, h)
 
-def public_key_to_p2wpkh(public_key):
-    return hash_to_segwit_addr(hash_160(public_key))
-
-def script_to_p2wsh(script):
-    return hash_to_segwit_addr(sha256(bfh(script)))
-
-def p2wpkh_nested_script(pubkey):
-    pkh = bh2u(hash_160(bfh(pubkey)))
-    return '00' + push_script(pkh)
-
-def p2wsh_nested_script(witness_script):
-    wsh = bh2u(sha256(bfh(witness_script)))
-    return '00' + push_script(wsh)
-
 def pubkey_to_address(txin_type, pubkey):
     if txin_type == 'p2pkh':
         return public_key_to_p2pkh(bfh(pubkey))
-    elif txin_type == 'p2wpkh':
-        return hash_to_segwit_addr(hash_160(bfh(pubkey)))
-    elif txin_type == 'p2wpkh-p2sh':
-        scriptSig = p2wpkh_nested_script(pubkey)
-        return hash160_to_p2sh(hash_160(bfh(scriptSig)))
     else:
         raise NotImplementedError(txin_type)
 
 def redeem_script_to_address(txin_type, redeem_script):
     if txin_type == 'p2sh':
         return hash160_to_p2sh(hash_160(bfh(redeem_script)))
-    elif txin_type == 'p2wsh':
-        return script_to_p2wsh(redeem_script)
-    elif txin_type == 'p2wsh-p2sh':
-        scriptSig = p2wsh_nested_script(redeem_script)
-        return hash160_to_p2sh(hash_160(bfh(scriptSig)))
     else:
         raise NotImplementedError(txin_type)
 
@@ -521,11 +479,7 @@ def DecodeBase58Check(psz):
 
 SCRIPT_TYPES = {
     'p2pkh':0,
-    'p2wpkh':1,
-    'p2wpkh-p2sh':2,
     'p2sh':5,
-    'p2wsh':6,
-    'p2wsh-p2sh':7
 }
 
 
@@ -576,13 +530,6 @@ def address_from_private_key(sec):
     public_key = public_key_from_private_key(privkey, compressed)
     return pubkey_to_address(txin_type, public_key)
 
-def is_segwit_address(addr):
-    try:
-        witver, witprog = segwit_addr.decode(NetworkConstants.SEGWIT_HRP, addr)
-    except Exception as e:
-        return False
-    return witprog is not None
-
 def is_b58_address(addr):
     try:
         addrtype, h = b58_address_to_hash160(addr)
@@ -593,7 +540,7 @@ def is_b58_address(addr):
     return addr == hash160_to_b58_address(h, addrtype)
 
 def is_address(addr):
-    return is_segwit_address(addr) or is_b58_address(addr)
+    return is_b58_address(addr)
 
 
 def is_private_key(key):
@@ -637,7 +584,7 @@ def verify_message(address, sig, message):
         public_key, compressed = pubkey_from_signature(sig, h)
         # check public key using the address
         pubkey = point_to_ser(public_key.pubkey.point, compressed)
-        for txin_type in ['p2pkh','p2wpkh','p2wpkh-p2sh']:
+        for txin_type in ['p2pkh']:
             addr = pubkey_to_address(txin_type, bh2u(pubkey))
             if address == addr:
                 break
