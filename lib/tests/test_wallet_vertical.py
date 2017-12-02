@@ -8,8 +8,6 @@ import lib.wallet as wallet
 
 from plugins.trustedcoin import trustedcoin
 
-
-# TODO passphrase/seed_extension
 class TestWalletKeystoreAddressIntegrity(unittest.TestCase):
 
     gap_limit = 1  # make tests run faster
@@ -260,23 +258,5 @@ class TestWalletKeystoreAddressIntegrity(unittest.TestCase):
         self.assertEqual(w.get_receiving_addresses()[0], '3JPTQ2nitVxXBJ1yhMeDwH6q417UifE3bN')
         self.assertEqual(w.get_change_addresses()[0], '3FGyDuxgUDn2pSZe5xAJH1yUwSdhzDMyEE')
 
-    @mock.patch.object(storage.WalletStorage, '_write')
-    def test_bip39_multisig_seed_p2sh_segwit(self, mock_write):
-        # bip39 seed: pulse mixture jazz invite dune enrich minor weapon mosquito flight fly vapor
-        # der: m/49'/0'/0'
-        # NOTE: there is currently no bip43 standard derivation path for p2wsh-p2sh
-        ks1 = keystore.from_xprv('YprvAUXFReVvDjrPerocC3FxVH748sJUTvYjkAhtKop5VnnzVzMEHr1CHrYQKZwfJn1As3X4LYMav6upxd5nDiLb6SCjRZrBH76EFvyQAG4cn79')
-        self.assertTrue(isinstance(ks1, keystore.BIP32_KeyStore))
-        self.assertEqual(ks1.xpub, 'Ypub6hWbqA2p47QgsLt5J4nxrR3ngu8xsPGb7PdV8CDh48KyNngNqPKSqertAqYhQ4umELu1UsZUCYfj9XPA6AdSMZWDZQobwF7EJ8uNrECaZg1')
-
-        # bip39 seed: slab mixture skin evoke harsh tattoo rare crew sphere extend balcony frost
-        # der: m/49'/0'/0'
-        ks2 = keystore.from_xpub('Ypub6iNDhL4WWq5kFZcdFqHHwX4YTH4rYGp8xbndpRrY7WNZFFRfogSrL7wRTajmVHgR46AT1cqUG1mrcRd7h1WXwBsgX2QvT3zFbBCDiSDLkau')
-        self._check_xpub_keystore_sanity(ks2)
-        self.assertTrue(isinstance(ks2, keystore.BIP32_KeyStore))
-
-        w = self._create_multisig_wallet(ks1, ks2)
-        self.assertEqual(w.txin_type, 'p2wsh-p2sh')
-
-        self.assertEqual(w.get_receiving_addresses()[0], '35LeC45QgCVeRor1tJD6LiDgPbybBXisns')
-        self.assertEqual(w.get_change_addresses()[0], '39RhtDchc6igmx5tyoimhojFL1ZbQBrXa6')
+        self.assertEqual(w.get_receiving_addresses()[0], '3H3iyACDTLJGD2RMjwKZcCwpdYZLwEZzKb')
+        self.assertEqual(w.get_change_addresses()[0], '31hyfHrkhNjiPZp1t7oky5CGNYqSqDAVM9')
