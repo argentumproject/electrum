@@ -29,7 +29,7 @@ import sys
 import time
 
 import jsonrpclib
-from jsonrpclib.SimpleJSONRPCServer import SimpleJSONRPCServer, SimpleJSONRPCRequestHandler
+from jsonrpclib.SimpleJSONRPCServer import SimpleJSONRPCServer
 
 from version import ELECTRUM_VERSION
 from network import Network
@@ -84,21 +84,6 @@ def get_server(config):
         # Sleep a bit and try again; it might have just been started
         time.sleep(1.0)
 
-
-
-class RequestHandler(SimpleJSONRPCRequestHandler):
-
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def end_headers(self):
-        self.send_header("Access-Control-Allow-Headers",
-                         "Origin, X-Requested-With, Content-Type, Accept")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        SimpleJSONRPCRequestHandler.end_headers(self)
-
-
 class Daemon(DaemonThread):
 
     def __init__(self, config, fd):
@@ -123,10 +108,9 @@ class Daemon(DaemonThread):
         host = config.get('rpchost', '127.0.0.1')
         port = config.get('rpcport', 0)
         try:
-            server = SimpleJSONRPCServer((host, port), logRequests=False,
-                                         requestHandler=RequestHandler)
-        except:
-            self.print_error('Warning: cannot initialize RPC server on host', host)
+            server = SimpleJSONRPCServer((host, port), logRequests=False)
+        except Exception as e:
+            self.print_error('Warning: cannot initialize RPC server on host', host, e)
             self.server = None
             os.close(fd)
             return
