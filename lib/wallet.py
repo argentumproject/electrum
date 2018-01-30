@@ -294,6 +294,10 @@ class Abstract_Wallet(PrintError):
         return self.get_pubkeys(*sequence)
 
     def add_unverified_tx(self, tx_hash, tx_height):
+        if tx_height == 0 and tx_hash in self.verified_tx:
+            self.verified_tx.pop(tx_hash)
+            self.verifier.merkle_roots.pop(tx_hash, None)
+
         # tx will be verified only if height > 0
         if tx_hash not in self.verified_tx:
             self.unverified_tx[tx_hash] = tx_height
@@ -310,15 +314,18 @@ class Abstract_Wallet(PrintError):
         '''Returns a map from tx hash to transaction height'''
         return self.unverified_tx
 
-    def undo_verifications(self, height):
+    def undo_verifications(self, blockchain, height):
         '''Used by the verifier when a reorg has happened'''
-        txs = []
+        txs = set()
         with self.lock:
-            for tx_hash, item in self.verified_tx:
+            for tx_hash, item in self.verified_tx.items():
                 tx_height, timestamp, pos = item
                 if tx_height >= height:
-                    self.verified_tx.pop(tx_hash, None)
-                    txs.append(tx_hash)
+                    header = blockchain.read_header(tx_height)
+                    # fixme: use block hash, not timestamp
+                    if not header or header.get('timestamp') != timestamp:
+                        self.verified_tx.pop(tx_hash, None)
+                        txs.add(tx_hash)
         return txs
 
     def get_local_height(self):
@@ -528,10 +535,11 @@ class Abstract_Wallet(PrintError):
                     u -= v
         return c, u, x
 
-    def get_spendable_coins(self, domain = None):
-        return self.get_utxos(domain, exclude_frozen=True, mature=True)
+    def get_spendable_coins(self, domain, config):
+        confirmed_only = config.get('confirmed_only', True)
+        return self.get_utxos(domain, exclude_frozen=True, mature=True, confirmed_only=confirmed_only)
 
-    def get_utxos(self, domain = None, exclude_frozen = False, mature = False):
+    def get_utxos(self, domain = None, exclude_frozen = False, mature = False, confirmed_only = False):
         coins = []
         if domain is None:
             domain = self.get_addresses()
@@ -540,6 +548,8 @@ class Abstract_Wallet(PrintError):
         for addr in domain:
             utxos = self.get_addr_utxo(addr)
             for x in utxos:
+                if confirmed_only and x['height'] <= 0:
+                    continue
                 if mature and x['coinbase'] and x['height'] + COINBASE_MATURITY > self.get_local_height():
                     continue
                 coins.append(x)
@@ -854,7 +864,8 @@ class Abstract_Wallet(PrintError):
         # Sort the inputs and outputs deterministically
         tx.BIP_LI01_sort()
         # Timelock tx to current height.
-        tx.locktime = self.get_local_height()
+        # Disabled until keepkey firmware update
+        # tx.locktime = self.get_local_height()
         run_hook('make_unsigned_transaction', self, tx)
         return tx
 
@@ -863,7 +874,7 @@ class Abstract_Wallet(PrintError):
         return fee
 
     def mktx(self, outputs, password, config, fee=None, change_addr=None, domain=None):
-        coins = self.get_spendable_coins(domain)
+        coins = self.get_spendable_coins(domain, config)
         tx = self.make_unsigned_transaction(coins, outputs, config, fee, change_addr)
         self.sign_transaction(tx, password)
         return tx
@@ -991,7 +1002,7 @@ class Abstract_Wallet(PrintError):
             self.synchronize()
 
     def can_export(self):
-        return not self.is_watching_only()
+        return not self.is_watching_only() and hasattr(self.keystore, 'get_private_key')
 
     def is_used(self, address):
         h = self.history.get(address,[])
@@ -1027,6 +1038,11 @@ class Abstract_Wallet(PrintError):
         # ... unless there is none
         if not s:
             s = outputs
+            x_fee = run_hook('get_tx_extra_fee', self, tx)
+            if x_fee:
+                x_fee_address, x_fee_amount = x_fee
+                s = filter(lambda x: x[1]!=x_fee_address, s)
+
         # prioritize low value outputs, to get rid of dust
         s = sorted(s, key=lambda x: x[2])
         for o in s:
@@ -1068,7 +1084,7 @@ class Abstract_Wallet(PrintError):
         txin['type'] = self.txin_type
         # Add address for utxo that are in wallet
         if txin.get('scriptSig') == '':
-            coins = self.get_spendable_coins()
+            coins = self.get_utxos()
             for item in coins:
                 if txin.get('prevout_hash') == item.get('prevout_hash') and txin.get('prevout_n') == item.get('prevout_n'):
                     txin['address'] = item.get('address')
@@ -1730,9 +1746,12 @@ class Multisig_Wallet(Deterministic_Wallet, P2SH):
         return ''.join(sorted(self.get_master_public_keys()))
 
     def add_input_sig_info(self, txin, address):
+        # x_pubkeys are not sorted here because it would be too slow
+        # they are sorted in transaction.get_sorted_pubkeys
+        # pubkeys is set to None to signal that x_pubkeys are unsorted
         derivation = self.get_address_index(address)
-        # extended pubkeys
         txin['x_pubkeys'] = [k.get_xpubkey(*derivation) for k in self.get_keystores()]
+        txin['pubkeys'] = None
         # we need n place holders
         txin['signatures'] = [None] * self.n
         txin['num_sig'] = self.m

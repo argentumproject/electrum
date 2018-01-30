@@ -41,7 +41,7 @@ class TrezorCompatibleKeyStore(Hardware_KeyStore):
         client = self.get_client()
         address_path = self.get_derivation() + "/%d/%d"%sequence
         address_n = client.expand_path(address_path)
-        msg_sig = client.sign_message(self.get_coin_name(), address_n, message)
+        msg_sig = client.sign_message(self.plugin.get_coin_name(), address_n, message)
         return msg_sig.signature
 
     def sign_transaction(self, tx, password):
@@ -52,9 +52,10 @@ class TrezorCompatibleKeyStore(Hardware_KeyStore):
         # path of the xpubs that are involved
         xpub_path = {}
         for txin in tx.inputs():
+            pubkeys, x_pubkeys = tx.get_sorted_pubkeys(txin)
             tx_hash = txin['prevout_hash']
             prev_tx[tx_hash] = txin['prev_tx'] 
-            for x_pubkey in txin['x_pubkeys']:
+            for x_pubkey in x_pubkeys:
                 if not is_xpubkey(x_pubkey):
                     continue
                 xpub, s = parse_xpubkey(x_pubkey)
@@ -90,7 +91,8 @@ class TrezorCompatiblePlugin(HW_PluginBase):
         try:
             return self.hid_transport(pair)
         except BaseException as e:
-            raise
+            # see fdb810ba622dc7dbe1259cbafb5b28e19d2ab114
+            # raise
             self.print_error("cannot connect at", device.path, str(e))
             return None
  
@@ -144,10 +146,7 @@ class TrezorCompatiblePlugin(HW_PluginBase):
         return client
 
     def get_coin_name(self):
-        if TESTNET:
-            return "Testnet"
-        else:
-            return "Argentum"
+        return "Testnet" if TESTNET else "Argentum"
 
     def initialize_device(self, device_id, wizard, handler):
         # Initialization method
@@ -307,9 +306,7 @@ class TrezorCompatiblePlugin(HW_PluginBase):
                 script_sig = txin['scriptSig'].decode('hex')
                 txinputtype.script_sig = script_sig
 
-            if 'sequence' in txin:
-                sequence = txin['sequence']
-                txinputtype.sequence = sequence
+            txinputtype.sequence = txin.get('sequence', 0xffffffff - 1)
 
             inputs.append(txinputtype)
 

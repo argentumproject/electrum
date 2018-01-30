@@ -96,14 +96,11 @@ def wizard_dialog(func):
 class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
 
     def __init__(self, config, app, plugins, storage):
-
         BaseWizard.__init__(self, config, storage)
         QDialog.__init__(self, None)
-
         self.setWindowTitle('Electrum  -  ' + _('Install Wizard'))
         self.app = app
         self.config = config
-
         # Set for base base class
         self.plugins = plugins
         self.language_for_seed = config.get('language')
@@ -112,6 +109,7 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
         self.title = QLabel()
         self.main_widget = QWidget()
         self.back_button = QPushButton(_("Back"), self)
+        self.back_button.setText(_('Back') if self.can_go_back() else _('Cancel'))
         self.next_button = QPushButton(_("Next"), self)
         self.next_button.setDefault(True)
         self.logo = QLabel()
@@ -147,63 +145,77 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
 
     def run_and_get_wallet(self):
 
-        def on_filename():
-            wallet_folder = os.path.dirname(self.storage.path)
+        vbox = QVBoxLayout()
+        hbox = QHBoxLayout()
+        hbox.addWidget(QLabel(_('Wallet') + ':'))
+        self.name_e = QLineEdit()
+        hbox.addWidget(self.name_e)
+        button = QPushButton(_('Choose...'))
+        hbox.addWidget(button)
+        vbox.addLayout(hbox)
+
+        self.msg_label = QLabel('')
+        vbox.addWidget(self.msg_label)
+        hbox2 = QHBoxLayout()
+        self.pw_e = QLineEdit('', self)
+        self.pw_e.setFixedWidth(150)
+        self.pw_e.setEchoMode(2)
+        self.pw_label = QLabel(_('Password') + ':')
+        hbox2.addWidget(self.pw_label)
+        hbox2.addWidget(self.pw_e)
+        hbox2.addStretch()
+        vbox.addLayout(hbox2)
+        self.set_layout(vbox, title=_('Electrum wallet'))
+
+        wallet_folder = os.path.dirname(self.storage.path)
+
+        def on_choose():
             path = unicode(QFileDialog.getOpenFileName(self, "Select your wallet file", wallet_folder))
             if path:
                 self.name_e.setText(path)
+
+        def on_filename(filename):
+            filename = unicode(filename)
+            path = os.path.join(wallet_folder, filename.encode('utf8'))
+            try:
                 self.storage = WalletStorage(path)
-                update_layout()
-        def update_layout():
-            name = os.path.basename(self.storage.path)
-            vbox = QVBoxLayout()
-            hbox = QHBoxLayout()
-            hbox.addWidget(QLabel(_('Wallet') + ':'))
-            self.name_e = QLineEdit(text=name)
-            hbox.addWidget(self.name_e)
-            button = QPushButton(_('Choose...'))
-            button.clicked.connect(on_filename)
-            hbox.addWidget(button)
-            vbox.addLayout(hbox)
-            self.pw_e = None
-
-            if not self.storage.file_exists():
-                msg = _("This file does not exist.") + '\n' \
-                      + _("Press 'Next' to create this wallet, or chose another file.")
-                vbox.addWidget(QLabel(msg))
-
-            elif self.storage.file_exists() and self.storage.is_encrypted():
-                msg = _("This file is encrypted.") + '\n' + _('Enter your password or choose another file.')
-                vbox.addWidget(QLabel(msg))
-                hbox2 = QHBoxLayout()
-                self.pw_e = QLineEdit('', self)
-                self.pw_e.setFixedWidth(150)
-                self.pw_e.setEchoMode(2)
-                hbox2.addWidget(QLabel(_('Password') + ':'))
-                hbox2.addWidget(self.pw_e)
-                hbox2.addStretch()
-                vbox.addLayout(hbox2)
+            except IOError:
+                self.storage = None
+            if self.storage:
+                if not self.storage.file_exists():
+                    msg =_("This file does not exist.") + '\n' \
+                          + _("Press 'Next' to create this wallet, or choose another file.")
+                    pw = False
+                elif self.storage.file_exists() and self.storage.is_encrypted():
+                    msg = _("This file is encrypted.") + '\n' + _('Enter your password or choose another file.')
+                    pw = True
+                else:
+                    msg = _("Press 'Next' to open this wallet.")
+                    pw = False
             else:
-                msg = _("Press 'Next' to open this wallet.")
-                vbox.addWidget(QLabel(msg))
-
-            self.set_layout(vbox, title=_('Electrum wallet'))
-            if self.pw_e:
+                msg = _('Cannot read file')
+                pw = False
+            self.msg_label.setText(msg)
+            if pw:
+                self.pw_label.show()
                 self.pw_e.show()
                 self.pw_e.setFocus()
+            else:
+                self.pw_label.hide()
+                self.pw_e.hide()
+
+        button.clicked.connect(on_choose)
+        self.name_e.textChanged.connect(on_filename)
+        n = os.path.basename(self.storage.path)
+        self.name_e.setText(n.decode('utf8'))
 
         while True:
-            update_layout()
-
             if self.storage.file_exists() and not self.storage.is_encrypted():
                 break
-
-            if not self.loop.exec_():
+            if self.loop.exec_() != 2:  # 2 = next
                 return
-
             if not self.storage.file_exists():
                 break
-
             if self.storage.file_exists() and self.storage.is_encrypted():
                 password = unicode(self.pw_e.text())
                 try:
@@ -216,7 +228,6 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
                     traceback.print_exc(file=sys.stdout)
                     QMessageBox.information(None, _('Error'), str(e), _('OK'))
                     return
-
 
         path = self.storage.path
         if self.storage.requires_split():
@@ -240,7 +251,6 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
             self.storage.upgrade()
             self.show_warning(_('Your wallet was upgraded successfully'))
             self.wallet = Wallet(self.storage)
-            self.terminate()
             return self.wallet
 
         action = self.storage.get_action()
@@ -260,7 +270,6 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
             return self.wallet
 
         self.wallet = Wallet(self.storage)
-        self.terminate()
         return self.wallet
 
 
@@ -453,7 +462,7 @@ class InstallWizard(QDialog, MessageBoxMixin, BaseWizard):
         line = QLineEdit()
         line.setText(default)
         def f(text):
-            self.next_button.setEnabled(test(text))
+            self.next_button.setEnabled(test(unicode(text)))
         line.textEdited.connect(f)
         vbox.addWidget(line)
         vbox.addWidget(WWLabel(warning))

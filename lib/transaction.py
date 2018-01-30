@@ -333,9 +333,7 @@ def parse_scriptSig(d, bytes):
         try:
             signatures = parse_sig([sig])
             pubkey, address = xpubkey_to_address(x_pubkey)
-        except:
-            import traceback
-            traceback.print_exc(file=sys.stdout)
+        except BaseException:
             print_error("cannot find address in input script", bytes.encode('hex'))
             return
         d['type'] = 'p2pkh'
@@ -415,6 +413,7 @@ def parse_input(vds):
     if prevout_hash == '00'*32:
         d['type'] = 'coinbase'
     else:
+        d['x_pubkeys'] = []
         d['pubkeys'] = []
         d['signatures'] = {}
         d['address'] = None
@@ -515,6 +514,7 @@ class Transaction:
         self._inputs = None
         self._outputs = None
         self.locktime = 0
+        self.version = 1
 
     def update(self, raw):
         self.raw = raw
@@ -583,6 +583,7 @@ class Transaction:
         self._inputs = d['inputs']
         self._outputs = [(x['type'], x['address'], x['value']) for x in d['outputs']]
         self.locktime = d['lockTime']
+        self.version = d['version']
         return d
 
     @classmethod
@@ -656,8 +657,8 @@ class Transaction:
             return push_script(redeem_script)
         elif _type == 'address':
             script += push_script(pubkeys[0])
-        else:
-            raise TypeError('Unknown txin type', _type)
+        elif _type == 'unknown':
+            return txin['scriptSig']
         return script
 
     @classmethod
@@ -686,13 +687,8 @@ class Transaction:
         # Script length, script, sequence
         s += var_int(len(script)/2)
         s += script
-        s += int_to_hex(txin.get('sequence', 0xffffffff), 4)
+        s += int_to_hex(txin.get('sequence', 0xffffffff - 1), 4)
         return s
-
-    def set_rbf(self, rbf):
-        nSequence = 0xffffffff - (2 if rbf else 0)
-        for txin in self.inputs():
-            txin['sequence'] = nSequence
 
     def BIP_LI01_sort(self):
         # See https://github.com/kristovatlas/rfc/blob/master/bips/bip-li01.mediawiki
@@ -708,7 +704,7 @@ class Transaction:
         return s
 
     def serialize_preimage(self, i):
-        nVersion = int_to_hex(1, 4)
+        nVersion = int_to_hex(self.version, 4)
         nHashType = int_to_hex(1, 4)
         nLocktime = int_to_hex(self.locktime, 4)
         inputs = self.inputs()
@@ -716,12 +712,12 @@ class Transaction:
         txin = inputs[i]
         if self.is_segwit_input(txin):
             hashPrevouts = Hash(''.join(self.serialize_outpoint(txin) for txin in inputs).decode('hex')).encode('hex')
-            hashSequence = Hash(''.join(int_to_hex(txin.get('sequence', 0xffffffff), 4) for txin in inputs).decode('hex')).encode('hex')
+            hashSequence = Hash(''.join(int_to_hex(txin.get('sequence', 0xffffffff - 1), 4) for txin in inputs).decode('hex')).encode('hex')
             hashOutputs = Hash(''.join(self.serialize_output(o) for o in outputs).decode('hex')).encode('hex')
             outpoint = self.serialize_outpoint(txin)
             scriptCode = push_script(self.get_preimage_script(txin))
             amount = int_to_hex(txin['value'], 8)
-            nSequence = int_to_hex(txin.get('sequence', 0xffffffff), 4)
+            nSequence = int_to_hex(txin.get('sequence', 0xffffffff - 1), 4)
             preimage = nVersion + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime + nHashType
         else:
             txins = var_int(len(inputs)) + ''.join(self.serialize_input(txin, self.get_preimage_script(txin) if i==k else '') for k, txin in enumerate(inputs))
@@ -733,7 +729,7 @@ class Transaction:
         return any(self.is_segwit_input(x) for x in self.inputs())
 
     def serialize(self, estimate_size=False, witness=True):
-        nVersion = int_to_hex(1, 4)
+        nVersion = int_to_hex(self.version, 4)
         nLocktime = int_to_hex(self.locktime, 4)
         inputs = self.inputs()
         outputs = self.outputs()
@@ -780,7 +776,7 @@ class Transaction:
         return self.input_value() - self.output_value()
 
     def is_final(self):
-        return not any([x.get('sequence', 0xffffffff) < 0xffffffff - 1 for x in self.inputs()])
+        return not any([x.get('sequence', 0xffffffff - 1) < 0xffffffff - 1 for x in self.inputs()])
 
     @profiler
     def estimated_size(self):
@@ -831,6 +827,7 @@ class Transaction:
                     assert public_key.verify_digest(sig, pre_hash, sigdecode = ecdsa.util.sigdecode_der)
                     txin['signatures'][j] = sig.encode('hex') + '01'
                     txin['x_pubkeys'][j] = pubkey
+                    txin['pubkeys'][j] = pubkey # needed for fd keys
                     self._inputs[i] = txin
         print_error("is_complete", self.is_complete())
         self.raw = self.serialize()

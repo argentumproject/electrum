@@ -23,8 +23,8 @@ if [ -d "electrum-arg-git" ]; then
     # GIT repository found, update it
     echo "Pull"
     cd electrum-arg-git
-    git checkout test
     git pull
+    git checkout $BRANCH
     cd ..
 else
     # GIT repository not found, clone it
