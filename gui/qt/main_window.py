@@ -1708,7 +1708,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         c = commands.Commands(self.config, self.wallet, self.network, lambda: self.console.set_json(True))
         methods = {}
         def mkfunc(f, method):
-            return lambda *args: apply( f, (method, args, self.password_dialog ))
+            return lambda *args: f(method, args, self.password_dialog)
         for m in dir(c):
             if m[0]=='_' or m in ['network','wallet']: continue
             methods[m] = mkfunc(c._run, m)
@@ -2619,7 +2619,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
 
         def on_unconf(x):
             self.config.set_key('confirmed_only', bool(x))
-        conf_only = self.config.get('confirmed_only', True)
+        conf_only = self.config.get('confirmed_only', False)
         unconf_cb = QCheckBox(_('Spend only confirmed coins'))
         unconf_cb.setToolTip(_('Spend only confirmed inputs.'))
         unconf_cb.setChecked(conf_only)
