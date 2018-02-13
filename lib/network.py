@@ -51,7 +51,7 @@ DEFAULT_PORTS = {'t':'50001', 's':'50002'}
 #then gradually switch remaining nodes to e-x nodes
 
 DEFAULT_SERVERS = {
-    '45.32.200.142':DEFAULT_PORTS,
+    '45.76.240.8':DEFAULT_PORTS,
     '45.76.112.155':DEFAULT_PORTS,
 }
 
