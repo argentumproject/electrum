@@ -1,11 +1,11 @@
 import threading
 
-from PyQt4.Qt import (QDialog, QInputDialog, QLineEdit,
-                      QVBoxLayout, QLabel, SIGNAL)
-import PyQt4.QtCore as QtCore
+from PyQt5.Qt import QInputDialog, QLineEdit, QVBoxLayout, QLabel
 
 from electrum_arg.i18n import _
-from .ledger import LedgerPlugin, BTChipWallet
+from electrum_arg.plugins import hook
+from electrum_arg.wallet import Standard_Wallet
+from .ledger import LedgerPlugin
 from ..hw_wallet.qt import QtHandlerBase, QtPluginBase
 from electrum_arg_gui.qt.util import *
 from electrum_arg.plugins import hook
@@ -25,7 +25,7 @@ class Plugin(LedgerPlugin):
             window.show_error(_("Ledger device not detected.\nContinuing in watching-only mode."))
             wallet.force_watching_only = True
 
-from btchip.btchipPersoWizard import StartBTChipPersoDialog
+#from btchip.btchipPersoWizard import StartBTChipPersoDialog
 
 class Plugin(LedgerPlugin, QtPluginBase):
     icon_unpaired = ":icons/ledger_unpaired.png"
@@ -33,6 +33,16 @@ class Plugin(LedgerPlugin, QtPluginBase):
 
     def create_handler(self, window):
         return Ledger_Handler(window)
+
+    @hook
+    def receive_menu(self, menu, addrs, wallet):
+        if type(wallet) is not Standard_Wallet:
+            return
+        keystore = wallet.get_keystore()
+        if type(keystore) == self.keystore_class and len(addrs) == 1:
+            def show_address():
+                keystore.thread.add(partial(self.show_address, wallet, addrs[0]))
+            menu.addAction(_("Show on Ledger"), show_address)
 
 class Ledger_Handler(QtHandlerBase):
     setup_signal = pyqtSignal()

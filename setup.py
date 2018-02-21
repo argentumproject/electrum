@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 # python setup.py sdist --format=zip,gztar
 
@@ -9,12 +9,18 @@ import platform
 import imp
 import argparse
 
+with open('contrib/requirements/requirements.txt') as f:
+    requirements = f.read().splitlines()
+
+with open('contrib/requirements/requirements-hw.txt') as f:
+    requirements_hw = f.read().splitlines()
+
 version = imp.load_source('version', 'lib/version.py')
 
-if sys.version_info[:3] < (2, 7, 0):
-    sys.exit("Error: Electrum requires Python version >= 2.7.0...")
+if sys.version_info[:3] < (3, 4, 0):
+    sys.exit("Error: Electrum requires Python version >= 3.4.0...")
 
-data_files = []
+data_files = ['contrib/requirements/' + r for r in ['requirements.txt', 'requirements-hw.txt']]
 
 if platform.system() in ['Linux', 'FreeBSD', 'DragonFly']:
     parser = argparse.ArgumentParser()
@@ -35,18 +41,10 @@ if platform.system() in ['Linux', 'FreeBSD', 'DragonFly']:
 setup(
     name="Electrum-Argentum",
     version=version.ELECTRUM_VERSION,
-    install_requires=[
-        'pyaes',
-        'ecdsa>=0.9',
-        'pbkdf2',
-        'requests',
-        'qrcode',
-        'ltc_scrypt',
-        'protobuf',
-        'dnspython',
-        'jsonrpclib',
-        'PySocks>=1.6.6',
-    ],
+    install_requires=requirements,
+    extras_require={
+        'hardware': requirements_hw,
+    },
     packages=[
         'electrum_arg',
         'electrum_arg_gui',
@@ -71,7 +69,11 @@ setup(
     },
     package_data={
         'electrum_arg': [
+            'servers.json',
+            'servers_testnet.json',
             'currencies.json',
+            'checkpoints.json',
+            'checkpoints_testnet.json',
             'www/index.html',
             'wordlist/*.txt',
             'locale/*/LC_MESSAGES/electrum.mo',

@@ -20,17 +20,15 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
-import sys
 import re
 import dns
-import os
 import json
+import traceback
+import sys
 
-import bitcoin
-import dnssec
-from util import print_error
-from i18n import _
+from . import bitcoin
+from . import dnssec
+from .util import FileImportFailed, FileImportFailedEncrypted
 
 
 class Contacts(dict):
@@ -56,8 +54,12 @@ class Contacts(dict):
         try:
             with open(path, 'r') as f:
                 d = self._validate(json.loads(f.read()))
-        except:
-            return
+        except json.decoder.JSONDecodeError:
+            traceback.print_exc(file=sys.stderr)
+            raise FileImportFailedEncrypted()
+        except BaseException:
+            traceback.print_exc(file=sys.stdout)
+            raise FileImportFailed()
         self.update(d)
         self.save()
 
@@ -118,7 +120,7 @@ class Contacts(dict):
             return None
             
     def _validate(self, data):
-        for k,v in data.items():
+        for k,v in list(data.items()):
             if k == 'contacts':
                 return self._validate(v)
             if not bitcoin.is_address(k):

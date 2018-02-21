@@ -1,32 +1,30 @@
-from PyQt4.QtGui import *
+from PyQt5.QtGui import *
 from electrum_arg.i18n import _
 
 
 import datetime
 from collections import defaultdict
 
-from electrum_arg.util import format_satoshis
 from electrum_arg.bitcoin import COIN
 
 import matplotlib
-matplotlib.use('Qt4Agg')
+matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as md
 from matplotlib.patches import Ellipse
 from matplotlib.offsetbox import AnchoredOffsetbox, TextArea, DrawingArea, HPacker
 
 
-def plot_history(wallet, history):
+def plot_history(history):
     hist_in = defaultdict(int)
     hist_out = defaultdict(int)
     for item in history:
-        tx_hash, height, confirmations, timestamp, value, balance = item
-        if not confirmations:
+        if not item['confirmations']:
             continue
-        if timestamp is None:
+        if item['timestamp'] is None:
             continue
-        value = value*1./COIN
-        date = datetime.datetime.fromtimestamp(timestamp)
+        value = item['value'].value/COIN
+        date = item['date']
         datenum = int(md.date2num(datetime.date(date.year, date.month, 1)))
         if value > 0:
             hist_in[datenum] += value
@@ -48,7 +46,9 @@ def plot_history(wallet, history):
     dates, values = zip(*sorted(hist_in.items()))
     r1 = axarr[0].bar(dates, values, width, label='incoming')
     axarr[0].legend(loc='upper left')
-    dates, values = zip(*sorted(hist_out.items()))
-    r2 = axarr[1].bar(dates, values, width, color='r', label='outgoing')
-    axarr[1].legend(loc='upper left')
+    dates_values = list(zip(*sorted(hist_out.items())))
+    if dates_values and len(dates_values) == 2:
+        dates, values = dates_values
+        r2 = axarr[1].bar(dates, values, width, color='r', label='outgoing')
+        axarr[1].legend(loc='upper left')
     return plt

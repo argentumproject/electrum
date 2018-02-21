@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # -*- mode: python -*-
 #
 # Electrum - lightweight Bitcoin client
@@ -26,7 +26,7 @@
 
 import threading
 
-from PyQt4.Qt import QVBoxLayout, QLabel, SIGNAL
+from PyQt5.Qt import QVBoxLayout, QLabel
 from electrum_arg_gui.qt.password_dialog import PasswordDialog, PW_PASSPHRASE
 from electrum_arg_gui.qt.util import *
 
@@ -70,9 +70,10 @@ class QtHandlerBase(QObject, PrintError):
         self.status_signal.emit(paired)
 
     def _update_status(self, paired):
-        button = self.button
-        icon = button.icon_paired if paired else button.icon_unpaired
-        button.setIcon(QIcon(icon))
+        if hasattr(self, 'button'):
+            button = self.button
+            icon = button.icon_paired if paired else button.icon_unpaired
+            button.setIcon(QIcon(icon))
 
     def query_choice(self, msg, labels):
         self.done.clear()
@@ -123,7 +124,7 @@ class QtHandlerBase(QObject, PrintError):
             vbox.addWidget(pw)
             vbox.addLayout(Buttons(CancelButton(d), OkButton(d)))
             d.setLayout(vbox)
-            passphrase = unicode(pw.text()) if d.exec_() else None
+            passphrase = pw.text() if d.exec_() else None
         self.passphrase = passphrase
         self.done.set()
 
@@ -137,13 +138,13 @@ class QtHandlerBase(QObject, PrintError):
         hbox.addWidget(text)
         hbox.addStretch(1)
         dialog.exec_()  # Firmware cannot handle cancellation
-        self.word = unicode(text.text())
+        self.word = text.text()
         self.done.set()
 
     def message_dialog(self, msg, on_cancel):
         # Called more than once during signing, to confirm output and fee
         self.clear_dialog()
-        title = _('Please check your %s device') % self.device
+        title = _('Please check your {} device').format(self.device)
         self.dialog = dialog = WindowModalDialog(self.top_level_window(), title)
         l = QLabel(msg)
         vbox = QVBoxLayout(dialog)
@@ -180,8 +181,16 @@ class QtPluginBase(object):
     @hook
     def load_wallet(self, wallet, window):
         for keystore in wallet.get_keystores():
-            if type(keystore) != self.keystore_class:
+            if not isinstance(keystore, self.keystore_class):
                 continue
+            if not self.libraries_available:
+                if hasattr(self, 'libraries_available_message'):
+                    message = self.libraries_available_message + '\n'
+                else:
+                    message = _("Cannot find python library for") + " '%s'.\n" % self.name
+                message += _("Make sure you install it with python3")
+                window.show_error(message)
+                return
             tooltip = self.device + '\n' + (keystore.label or 'unnamed')
             cb = partial(self.show_settings_dialog, window, keystore)
             button = StatusBarButton(QIcon(self.icon_unpaired), tooltip, cb)

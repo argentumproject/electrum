@@ -1,9 +1,11 @@
+
 from electrum_arg.i18n import _
 from electrum_arg.plugins import run_hook
-from PyQt4.QtGui import *
-from PyQt4.QtCore import *
+from PyQt5.QtGui import *
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import QFileDialog
 
-from util import ButtonsTextEdit, MessageBoxMixin
+from .util import ButtonsTextEdit, MessageBoxMixin, ColorScheme
 
 
 class ShowQRTextEdit(ButtonsTextEdit):
@@ -16,11 +18,11 @@ class ShowQRTextEdit(ButtonsTextEdit):
         run_hook('show_text_edit', self)
 
     def qr_show(self):
-        from qrcodewidget import QRDialog
+        from .qrcodewidget import QRDialog
         try:
             s = str(self.toPlainText())
         except:
-            s = unicode(self.toPlainText())
+            s = self.toPlainText()
         QRDialog(s).exec_()
 
     def contextMenuEvent(self, e):
@@ -31,15 +33,17 @@ class ShowQRTextEdit(ButtonsTextEdit):
 
 class ScanQRTextEdit(ButtonsTextEdit, MessageBoxMixin):
 
-    def __init__(self, text=""):
+    def __init__(self, text="", allow_multi=False):
         ButtonsTextEdit.__init__(self, text)
+        self.allow_multi = allow_multi
         self.setReadOnly(0)
         self.addButton(":icons/file.png", self.file_input, _("Read file"))
-        self.addButton(":icons/qrcode.png", self.qr_input, _("Read QR code"))
+        icon = ":icons/qrcode_white.png" if ColorScheme.dark_scheme else ":icons/qrcode.png"
+        self.addButton(icon, self.qr_input, _("Read QR code"))
         run_hook('scan_text_edit', self)
 
     def file_input(self):
-        fileName = unicode(QFileDialog.getOpenFileName(self, 'select file'))
+        fileName, __ = QFileDialog.getOpenFileName(self, 'select file')
         if not fileName:
             return
         with open(fileName, "r") as f:
@@ -53,9 +57,13 @@ class ScanQRTextEdit(ButtonsTextEdit, MessageBoxMixin):
         except BaseException as e:
             self.show_error(str(e))
             data = ''
-        if type(data) != str:
+        if not data:
             data = ''
-        self.setText(data)
+        if self.allow_multi:
+            new_text = self.text() + data + '\n'
+        else:
+            new_text = data
+        self.setText(new_text)
         return data
 
     def contextMenuEvent(self, e):

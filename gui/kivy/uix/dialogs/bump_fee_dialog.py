@@ -73,7 +73,7 @@ class BumpFeeDialog(Factory.Popup):
         self.callback = callback
         self.config = app.electrum_config
         self.fee_step = self.config.max_fee_rate() / 10
-        self.dynfees = self.config.get('dynamic_fees', True) and self.app.network
+        self.dynfees = self.config.is_dynfee() and self.app.network
         self.ids.old_fee.value = self.app.format_amount_and_units(self.init_fee)
         self.update_slider()
         self.update_text()
@@ -102,9 +102,9 @@ class BumpFeeDialog(Factory.Popup):
         if self.dynfees:
             if self.config.has_fee_estimates():
                 dynfee = self.config.dynfee(value)
-                return dynfee * self.tx_size // 1000
+                return int(dynfee * self.tx_size // 1000)
         else:
-            return value*self.fee_step * self.tx_size // 1000
+            return int(value*self.fee_step * self.tx_size // 1000)
 
     def on_ok(self):
         new_fee = self.get_fee()

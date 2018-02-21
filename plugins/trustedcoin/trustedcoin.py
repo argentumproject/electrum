@@ -25,23 +25,22 @@
 
 import socket
 import os
-import re
 import requests
 import json
-from hashlib import sha256
-from urlparse import urljoin
-from urllib import quote
+from urllib.parse import urljoin
+from urllib.parse import quote
 
-import electrum_arg as electrum
+import electrum_arg
 from electrum_arg import bitcoin
 from electrum_arg import keystore
 from electrum_arg.bitcoin import *
 from electrum_arg.mnemonic import Mnemonic
 from electrum_arg import version
-from electrum_arg.wallet import Multisig_Wallet, Deterministic_Wallet, Wallet
+from electrum_arg.wallet import Multisig_Wallet, Deterministic_Wallet
 from electrum_arg.i18n import _
-from electrum_arg.plugins import BasePlugin, run_hook, hook
+from electrum_arg.plugins import BasePlugin, hook
 from electrum_arg.util import NotEnoughFunds
+from electrum_arg.storage import STO_EV_USER_PW
 
 # signing_xpub is hardcoded so that the wallet can be restored from seed, without TrustedCoin's server
 signing_xpub = "xpub661MyMwAqRbcGnMkaTx2594P9EDuiEqMq25PM2aeG6UmwzaohgA6uDmNsvSUV8ubqwA3Wpste1hg69XHgjUuCD5HLcEp2QPzyV1HMrPppsL"
@@ -90,11 +89,10 @@ class TrustedCoinCosignerClient(object):
             kwargs['headers']['content-type'] = 'application/json'
         url = urljoin(self.base_url, relative_url)
         if self.debug:
-            print '%s %s %s' % (method, url, data)
+            print('%s %s %s' % (method, url, data))
         response = requests.request(method, url, **kwargs)
         if self.debug:
-            print response.text
-            print
+            print(response.text)
         if response.status_code != 200:
             message = str(response.text)
             if response.headers.get('content-type') == 'application/json':
@@ -192,6 +190,8 @@ server = TrustedCoinCosignerClient(user_agent="Electrum/" + version.ELECTRUM_VER
 
 class Wallet_2fa(Multisig_Wallet):
 
+    wallet_type = '2fa'
+
     def __init__(self, storage):
         self.m, self.n = 2, 3
         Deterministic_Wallet.__init__(self, storage)
@@ -249,11 +249,11 @@ class Wallet_2fa(Multisig_Wallet):
         assert price <= 100000 * n
         return price
 
-    def make_unsigned_transaction(self, coins, outputs, config,
-                                  fixed_fee=None, change_addr=None):
+    def make_unsigned_transaction(self, coins, outputs, config, fixed_fee=None,
+                                  change_addr=None, is_sweep=False):
         mk_tx = lambda o: Multisig_Wallet.make_unsigned_transaction(
             self, coins, o, config, fixed_fee, change_addr)
-        fee = self.extra_fee(config)
+        fee = self.extra_fee(config) if not is_sweep else 0
         if fee:
             address = self.billing_info['billing_address']
             fee_output = (TYPE_ADDRESS, address, fee)
@@ -331,6 +331,9 @@ class TrustedCoinPlugin(BasePlugin):
     def is_enabled(self):
         return True
 
+    def can_user_disable(self):
+        return False
+
     @hook
     def get_tx_extra_fee(self, wallet, tx):
         if type(wallet) != Wallet_2fa:
@@ -386,17 +389,27 @@ class TrustedCoinPlugin(BasePlugin):
         f = lambda x: wizard.request_passphrase(seed, x)
         wizard.show_seed_dialog(run_next=f, seed_text=seed)
 
+    @classmethod
+    def get_xkeys(self, seed, passphrase, derivation):
+        from electrum_arg.mnemonic import Mnemonic
+        from electrum_arg.keystore import bip32_root, bip32_private_derivation
+        bip32_seed = Mnemonic.mnemonic_to_seed(seed, passphrase)
+        xprv, xpub = bip32_root(bip32_seed, 'standard')
+        xprv, xpub = bip32_private_derivation(xprv, "m/", derivation)
+        return xprv, xpub
+
+    @classmethod
     def xkeys_from_seed(self, seed, passphrase):
         words = seed.split()
         n = len(words)
         # old version use long seed phrases
         if n >= 24:
             assert passphrase == ''
-            xprv1, xpub1 = keystore.xkeys_from_seed(' '.join(words[0:12]), '', "m/")
-            xprv2, xpub2 = keystore.xkeys_from_seed(' '.join(words[12:]), '', "m/")
+            xprv1, xpub1 = self.get_xkeys(' '.join(words[0:12]), '', "m/")
+            xprv2, xpub2 = self.get_xkeys(' '.join(words[12:]), '', "m/")
         elif n==12:
-            xprv1, xpub1 = keystore.xkeys_from_seed(seed, passphrase, "m/0'/")
-            xprv2, xpub2 = keystore.xkeys_from_seed(seed, passphrase, "m/1'/")
+            xprv1, xpub1 = self.get_xkeys(seed, passphrase, "m/0'/")
+            xprv2, xpub2 = self.get_xkeys(seed, passphrase, "m/1'/")
         else:
             raise BaseException('unrecognized seed length')
         return xprv1, xpub1, xprv2, xpub2
@@ -408,20 +421,22 @@ class TrustedCoinPlugin(BasePlugin):
         k2 = keystore.from_xpub(xpub2)
         wizard.request_password(run_next=lambda pw, encrypt: self.on_password(wizard, pw, encrypt, k1, k2))
 
-    def on_password(self, wizard, password, encrypt, k1, k2):
+    def on_password(self, wizard, password, encrypt_storage, k1, k2):
         k1.update_password(None, password)
-        wizard.storage.set_password(password, encrypt)
+        wizard.storage.set_keystore_encryption(bool(password))
+        if encrypt_storage:
+            wizard.storage.set_password(password, enc_version=STO_EV_USER_PW)
         wizard.storage.put('x1/', k1.dump())
         wizard.storage.put('x2/', k2.dump())
         wizard.storage.write()
         msg = [
-            _("Your wallet file is: %s.")%os.path.abspath(wizard.storage.path),
+            _("Your wallet file is: {}.").format(os.path.abspath(wizard.storage.path)),
             _("You need to be online in order to complete the creation of "
               "your wallet.  If you generated your seed on an offline "
-              'computer, click on "%s" to close this window, move your '
+              'computer, click on "{}" to close this window, move your '
               "wallet file to an online computer, and reopen it with "
-              "Electrum.") % _('Cancel'),
-            _('If you are online, click on "%s" to continue.') % _('Next')
+              "Electrum.").format(_('Cancel')),
+            _('If you are online, click on "{}" to continue.').format(_('Next'))
         ]
         msg = '\n\n'.join(msg)
         wizard.stack = []
@@ -458,7 +473,7 @@ class TrustedCoinPlugin(BasePlugin):
         else:
             self.create_keystore(wizard, seed, passphrase)
 
-    def on_restore_pw(self, wizard, seed, passphrase, password, encrypt):
+    def on_restore_pw(self, wizard, seed, passphrase, password, encrypt_storage):
         storage = wizard.storage
         xprv1, xpub1, xprv2, xpub2 = self.xkeys_from_seed(seed, passphrase)
         k1 = keystore.from_xprv(xprv1)
@@ -472,7 +487,11 @@ class TrustedCoinPlugin(BasePlugin):
         xpub3 = make_xpub(signing_xpub, long_user_id)
         k3 = keystore.from_xpub(xpub3)
         storage.put('x3/', k3.dump())
-        storage.set_password(password, encrypt)
+
+        storage.set_keystore_encryption(bool(password))
+        if encrypt_storage:
+            storage.set_password(password, enc_version=STO_EV_USER_PW)
+
         wizard.wallet = Wallet_2fa(storage)
         wizard.create_addresses()
 
@@ -554,9 +573,8 @@ class TrustedCoinPlugin(BasePlugin):
             _, _, _, _, c, k = deserialize_xprv(xprv)
             pk = bip32_private_key([0, 0], k, c)
             key = regenerate_key(pk)
-            compressed = is_compressed(pk)
-            sig = key.sign_message(message, compressed)
-            return base64.b64encode(sig)
+            sig = key.sign_message(message, True)
+            return base64.b64encode(sig).decode()
 
         signatures = [f(x) for x in [xprv1, xprv2]]
         r = server.reset_auth(short_id, challenge, signatures)
