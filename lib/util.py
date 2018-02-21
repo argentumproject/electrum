@@ -479,8 +479,8 @@ def time_difference(distance_in_time, include_seconds):
         return "over %d years" % (round(distance_in_minutes / 525600))
 
 mainnet_block_explorers = {
-    'Cryptoid.info': ('https://chainz.cryptoid.info/arg/tx.dws?',
-                        {'tx': 'transactions', 'addr': 'addresses'}),
+    'Cryptoid.info': ('https://chainz.cryptoid.info/arg/',
+                        {'tx': 'tx.dws?', 'addr': 'address.dws?'}),
     'system default': ('blockchain:/',
                         {'tx': 'tx/', 'addr': 'address/'}),
 }
