@@ -138,11 +138,7 @@ class KeepKeyCompatiblePlugin(HW_PluginBase):
         return client
 
     def get_coin_name(self):
-<<<<<<< HEAD:plugins/trezor/plugin.py
-        return "Testnet" if TESTNET else "Argentum"
-=======
-        return "Testnet" if NetworkConstants.TESTNET else "Bitcoin"
->>>>>>> refs/remotes/spesmilo/master:plugins/keepkey/plugin.py
+        return "Testnet" if NetworkConstants.TESTNET else "Argentum"
 
     def initialize_device(self, device_id, wizard, handler):
         # Initialization method
