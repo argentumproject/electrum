@@ -129,7 +129,7 @@ class BaseWizard(object):
         if self.wallet_type =='standard' or i==0:
             message = _('Do you want to create a new seed, or to restore a wallet using an existing seed?')
             choices = [
-                ('choose_seed_type', _('Create a new seed')),
+                ('create_standard_seed', _('Create a new seed')),
                 ('restore_from_seed', _('I already have a seed')),
                 ('restore_from_key', _('Use public or private keys')),
             ]
@@ -271,8 +271,6 @@ class BaseWizard(object):
         ])
         presets = (
             ('legacy BIP44', bip44_derivation(0, bip43_purpose=44)),
-            ('p2sh-segwit BIP49', bip44_derivation(0, bip43_purpose=49)),
-            ('native-segwit BIP84', bip44_derivation(0, bip43_purpose=84)),
         )
         while True:
             try:
@@ -319,7 +317,7 @@ class BaseWizard(object):
     def restore_from_seed(self):
         self.opt_bip39 = True
         self.opt_ext = True
-        is_cosigning_seed = lambda x: bitcoin.seed_type(x) in ['standard', 'segwit']
+        is_cosigning_seed = lambda x: bitcoin.seed_type(x) in ['standard']
         test = bitcoin.is_seed if self.wallet_type == 'standard' else is_cosigning_seed
         self.restore_seed_dialog(run_next=self.on_restore_seed, test=test)
 
@@ -328,7 +326,7 @@ class BaseWizard(object):
         if self.seed_type == 'bip39':
             f = lambda passphrase: self.on_restore_bip39(seed, passphrase)
             self.passphrase_dialog(run_next=f) if is_ext else f('')
-        elif self.seed_type in ['standard', 'segwit']:
+        elif self.seed_type in ['standard']:
             f = lambda passphrase: self.run('create_keystore', seed, passphrase)
             self.passphrase_dialog(run_next=f) if is_ext else f('')
         elif self.seed_type == 'old':
@@ -463,21 +461,6 @@ class BaseWizard(object):
         k = keystore.from_master_key(text, password)
         self.on_keystore(k)
 
-    def choose_seed_type(self):
-        title = _('Choose Seed type')
-        message = ' '.join([
-            _("The type of addresses used by your wallet will depend on your seed."),
-            _("Segwit wallets use bech32 addresses, defined in BIP173."),
-            _("Please note that websites and other wallets may not support these addresses yet."),
-            _("Thus, you might want to keep using a non-segwit wallet in order to be able to receive bitcoins during the transition period.")
-        ])
-        choices = [
-            ('create_standard_seed', _('Standard')),
-            ('create_segwit_seed', _('Segwit')),
-        ]
-        self.choice_dialog(title=title, message=message, choices=choices, run_next=self.run)
-
-    def create_segwit_seed(self): self.create_seed('segwit')
     def create_standard_seed(self): self.create_seed('standard')
 
     def create_seed(self, seed_type):

@@ -143,7 +143,7 @@ class SeedLayout(QVBoxLayout):
             t = seed_type(s)
             label = _('Seed Type') + ': ' + t if t else ''
         else:
-            from electrum.keystore import bip39_is_checksum_valid
+            from electrum_arg.keystore import bip39_is_checksum_valid
             is_checksum, is_wordlist = bip39_is_checksum_valid(s)
             status = ('checksum: ' + ('ok' if is_checksum else 'failed')) if is_wordlist else 'unknown wordlist'
             label = 'BIP39' + ' (%s)'%status

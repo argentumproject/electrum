@@ -56,6 +56,7 @@ class NetworkConstants:
         cls.ADDRTYPE_P2PKH = 23
         cls.ADDRTYPE_P2SH = 5
         cls.SEGWIT_HRP = "bc"
+        cls.HEADERS_URL = "http://electrum-arg.org/blockchain_headers"
         cls.GENESIS = "88c667bc63167685e4e4da058fffdfe8e007e5abffd6855de52ad59df7bb0bb2"
         cls.DEFAULT_PORTS = {'t': '50001', 's': '50002'}
         cls.DEFAULT_SERVERS = read_json('servers.json', {})
@@ -63,17 +64,9 @@ class NetworkConstants:
 
         cls.XPRV_HEADERS = {
             'standard':    0x0488ade4,  # xprv
-            'p2wpkh-p2sh': 0x049d7878,  # yprv
-            'p2wsh-p2sh':  0x0295b005,  # Yprv
-            'p2wpkh':      0x04b2430c,  # zprv
-            'p2wsh':       0x02aa7a99,  # Zprv
         }
         cls.XPUB_HEADERS = {
             'standard':    0x0488b21e,  # xpub
-            'p2wpkh-p2sh': 0x049d7cb2,  # ypub
-            'p2wsh-p2sh':  0x0295b43f,  # Ypub
-            'p2wpkh':      0x04b24746,  # zpub
-            'p2wsh':       0x02aa7ed3,  # Zpub
         }
 
     @classmethod
@@ -291,8 +284,6 @@ def seed_type(x):
         return 'old'
     elif is_new_seed(x):
         return 'standard'
-    elif is_new_seed(x, version.SEED_PREFIX_SW):
-        return 'segwit'
     #elif is_new_seed(x, version.SEED_PREFIX_2FA):
         #return '2fa'
     return ''
@@ -400,13 +391,6 @@ def script_to_address(script):
     return addr
 
 def address_to_script(addr):
-    witver, witprog = segwit_addr.decode(NetworkConstants.SEGWIT_HRP, addr)
-    if witprog is not None:
-        assert (0 <= witver <= 16)
-        OP_n = witver + 0x50 if witver > 0 else 0
-        script = bh2u(bytes([OP_n]))
-        script += push_script(bh2u(bytes(witprog)))
-        return script
     addrtype, hash_160 = b58_address_to_hash160(addr)
     if addrtype == NetworkConstants.ADDRTYPE_P2PKH:
         script = '76a9'                                      # op_dup, op_hash_160
@@ -520,12 +504,8 @@ def DecodeBase58Check(psz):
 # extended key export format for segwit
 
 SCRIPT_TYPES = {
-    'p2pkh':0,
-    'p2wpkh':1,
-    'p2wpkh-p2sh':2,
+    'p2pkh':23,
     'p2sh':5,
-    'p2wsh':6,
-    'p2wsh-p2sh':7
 }
 
 
@@ -593,7 +573,7 @@ def is_b58_address(addr):
     return addr == hash160_to_b58_address(h, addrtype)
 
 def is_address(addr):
-    return is_segwit_address(addr) or is_b58_address(addr)
+    return is_b58_address(addr)
 
 
 def is_private_key(key):

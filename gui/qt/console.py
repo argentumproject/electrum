@@ -3,17 +3,10 @@
 
 import sys, os, re
 import traceback, platform
-<<<<<<< HEAD
-from PyQt4 import QtCore
-from PyQt4 import QtGui
-from electrum_arg import util
-=======
 from PyQt5 import QtCore
 from PyQt5 import QtGui
 from PyQt5 import QtWidgets
-from electrum import util
->>>>>>> refs/remotes/spesmilo/master
-
+from electrum_arg import util
 
 if platform.system() == 'Windows':
     MONOSPACE_FONT = 'Lucida Console'

@@ -27,12 +27,6 @@ from . import util
 from . import bitcoin
 from .bitcoin import *
 
-try:
-    from ltc_scrypt import getPoWHash
-except ImportError:
-    util.print_msg("Warning: ltc_scrypt not available, using fallback")
-    from scrypt import scrypt_1024_1_1_80 as getPoWHash
-
 MAX_TARGET = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
 
 def serialize_header(res):
@@ -77,11 +71,7 @@ def read_blockchains(config):
         checkpoint = int(filename.split('_')[2])
         parent_id = int(filename.split('_')[1])
         b = Blockchain(config, checkpoint, parent_id)
-        h = b.read_header(b.checkpoint)
-        if b.parent().can_connect(h, check_height=False):
-            blockchains[b.checkpoint] = b
-        else:
-            util.print_error("cannot connect", filename)
+        blockchains[b.checkpoint] = b
     return blockchains
 
 def check_header(header):
@@ -156,15 +146,15 @@ class Blockchain(util.PrintError):
 
     def verify_header(self, header, prev_hash, target):
         _hash = hash_header(header)
-        #if prev_hash != header.get('prev_block_hash'):
-            #raise BaseException("prev hash mismatch: %s vs %s" % (prev_hash, header.get('prev_block_hash')))
+        if prev_hash != header.get('prev_block_hash'):
+            raise BaseException("prev hash mismatch: %s vs %s" % (prev_hash, header.get('prev_block_hash')))
         if bitcoin.NetworkConstants.TESTNET:
             return
         bits = self.target_to_bits(target)
         #if bits != header.get('bits'):
-            #raise BaseException("bits mismatch: %s vs %s" % (bits, header.get('bits')))
-        if int('0x' + _hash, 16) > target:
-            raise BaseException("insufficient proof of work: %s vs target %s" % (int('0x' + _hash, 16), target))
+        #    raise BaseException("bits mismatch: %s vs %s" % (bits, header.get('bits')))
+        # if int('0x' + _hash, 16) > target:
+        #     raise BaseException("insufficient proof of work: %s vs target %s" % (int('0x' + _hash, 16), target))
 
     def verify_chunk(self, index, data):
         num = len(data) // 80
@@ -175,14 +165,6 @@ class Blockchain(util.PrintError):
             header = deserialize_header(raw_header, index*2016 + i)
             self.verify_header(header, prev_hash, target)
             prev_hash = hash_header(header)
-
-    def hash_header(self, header):
-        if header is None:
-            return '0' * 64
-        return hash_encode(Hash(self.serialize_header(header).decode('hex')))
-
-    def pow_hash_header(self, header):
-        return rev_hex(getPoWHash(self.serialize_header(header).decode('hex')).encode('hex'))
 
     def path(self):
         d = util.get_headers_dir(self.config)
@@ -276,11 +258,6 @@ class Blockchain(util.PrintError):
             return '0000000000000000000000000000000000000000000000000000000000000000'
         elif height == 0:
             return bitcoin.NetworkConstants.GENESIS
-        elif height < len(self.checkpoints) * 2016:
-            assert (height+1) % 2016 == 0, height
-            index = height // 2016
-            h, t = self.checkpoints[index]
-            return h
         else:
             return hash_header(self.read_header(height))
 
