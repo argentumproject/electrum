@@ -33,7 +33,7 @@ from electrum_arg.util import block_explorer_URL
 from electrum_arg.util import timestamp_to_datetime, profiler
 
 try:
-    from electrum.plot import plot_history
+    from electrum_arg.plot import plot_history
 except:
     plot_history = None
 
@@ -405,5 +405,5 @@ class HistoryList(MyTreeWidget, AcceptFileDragDrop):
                 for line in lines:
                     transaction.writerow(line)
             else:
-                from electrum.util import json_encode
+                from electrum_arg.util import json_encode
                 f.write(json_encode(history))
