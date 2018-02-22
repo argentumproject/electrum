@@ -67,14 +67,7 @@ class PRNG:
             j = self.randint(0, i+1)
             x[i], x[j] = x[j], x[i]
 
-
-Bucket = namedtuple('Bucket',
-                    ['desc',
-                     'weight',      # as in BIP-141
-                     'value',       # in satoshis
-                     'coins',       # UTXOs
-                     'min_height',  # min block height where a coin was confirmed
-                     'witness'])    # whether any coin uses segwit
+Bucket = namedtuple('Bucket', ['desc', 'size', 'value', 'coins'])
 
 def strip_unneeded(bkts, sufficient_funds):
     '''Remove buckets that are unnecessary in achieving the spend amount'''
@@ -99,14 +92,10 @@ class CoinChooserBase(PrintError):
             buckets[key].append(coin)
 
         def make_Bucket(desc, coins):
-            witness = any(Transaction.is_segwit_input(coin) for coin in coins)
-            # note that we're guessing whether the tx uses segwit based
-            # on this single bucket
-            weight = sum(Transaction.estimated_input_weight(coin, witness)
-                         for coin in coins)
+            size = sum(Transaction.estimated_input_size(coin)
+                       for coin in coins)
             value = sum(coin['value'] for coin in coins)
-            min_height = min(coin['height'] for coin in coins)
-            return Bucket(desc, weight, value, coins, min_height, witness)
+            return Bucket(desc, size, value, coins)
 
         return list(map(make_Bucket, buckets.keys(), buckets.values()))
 
@@ -200,37 +189,17 @@ class CoinChooserBase(PrintError):
         self.p = PRNG(''.join(sorted(utxos)))
 
         # Copy the ouputs so when adding change we don't modify "outputs"
-        tx = Transaction.from_io([], outputs[:])
-        # Weight of the transaction with no inputs and no change
-        # Note: this will use legacy tx serialization as the need for "segwit"
-        # would be detected from inputs. The only side effect should be that the
-        # marker and flag are excluded, which is compensated in get_tx_weight()
-        base_weight = tx.estimated_weight()
+        tx = Transaction.from_io([], outputs)
+        # Size of the transaction with no inputs and no change
+        base_size = tx.estimated_size()
         spent_amount = tx.output_value()
-
-        def fee_estimator_w(weight):
-            return fee_estimator(Transaction.virtual_size_from_weight(weight))
-
-        def get_tx_weight(buckets):
-            total_weight = base_weight + sum(bucket.weight for bucket in buckets)
-            is_segwit_tx = any(bucket.witness for bucket in buckets)
-            if is_segwit_tx:
-                total_weight += 2  # marker and flag
-                # non-segwit inputs were previously assumed to have
-                # a witness of '' instead of '00' (hex)
-                # note that mixed legacy/segwit buckets are already ok
-                num_legacy_inputs = sum((not bucket.witness) * len(bucket.coins)
-                                        for bucket in buckets)
-                total_weight += num_legacy_inputs
-
-            return total_weight
 
         def sufficient_funds(buckets):
             '''Given a list of buckets, return True if it has enough
             value to pay for the transaction'''
             total_input = sum(bucket.value for bucket in buckets)
-            total_weight = get_tx_weight(buckets)
-            return total_input >= spent_amount + fee_estimator_w(total_weight)
+            total_size = sum(bucket.size for bucket in buckets) + base_size
+            return total_input >= spent_amount + fee_estimator(total_size)
 
         # Collect the coins into buckets, choose a subset of the buckets
         buckets = self.bucketize_coins(coins)
@@ -238,11 +207,11 @@ class CoinChooserBase(PrintError):
                                       self.penalty_func(tx))
 
         tx.add_inputs([coin for b in buckets for coin in b.coins])
-        tx_weight = get_tx_weight(buckets)
+        tx_size = base_size + sum(bucket.size for bucket in buckets)
 
-        # This takes a count of change outputs and returns a tx fee
-        output_weight = 4 * Transaction.estimated_output_size(change_addrs[0])
-        fee = lambda count: fee_estimator_w(tx_weight + count * output_weight)
+        # This takes a count of change outputs and returns a tx fee;
+        # each pay-to-bitcoin-address output serializes as 34 bytes
+        fee = lambda count: fee_estimator(tx_size + count * 34)
         change = self.change_outputs(tx, change_addrs, fee, dust_threshold)
         tx.add_outputs(change)
 
