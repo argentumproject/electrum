@@ -349,7 +349,7 @@ class SimpleConfig(PrintError):
                 else:
                     tooltip = ''
             else:
-                if self.has_fee_etas():
+                if self.has_fee_estimates():
                     eta = self.fee_to_eta(fee_rate)
                     tooltip = self.eta_tooltip(eta)
                 else:
@@ -388,7 +388,7 @@ class SimpleConfig(PrintError):
         dist = list(map(lambda x: abs(x - value), self.fee_rates))
         return min(range(len(dist)), key=dist.__getitem__)
 
-    def has_fee_etas(self):
+    def has_fee_estimates(self):
         return len(self.fee_estimates) == 4
 
     def has_fee_mempool(self):

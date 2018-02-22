@@ -31,12 +31,16 @@ class FeeSlider(QSlider):
             self.callback(self.dyn, pos, fee_rate)
 
     def get_tooltip(self, pos, fee_rate):
-        mempool = self.config.use_mempool_fees()
-        target, estimate = self.config.get_fee_text(pos, self.dyn, mempool, fee_rate)
+        from electrum_arg.util import fee_levels
+        rate_str = self.window.format_fee_rate(fee_rate) if fee_rate else _('unknown')
         if self.dyn:
-            return _('Target') + ': ' + target + '\n' + _('Current rate') + ': ' + estimate
+            tooltip = fee_levels[pos] + '\n' + rate_str
         else:
-            return _('Fixed rate') + ': ' + target + '\n' + _('Estimate') + ': ' + estimate
+            tooltip = 'Fixed rate: ' + rate_str
+            if self.config.has_fee_estimates():
+                i = self.config.reverse_dynfee(fee_rate)
+                #tooltip += '\n' + (_('Low fee') if i < 0 else 'Within %d blocks'%i)
+        return tooltip
 
     def update(self):
         with self.lock:

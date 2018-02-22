@@ -1254,11 +1254,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             if not outputs:
                 _type, addr = self.get_payto_or_dummy()
                 outputs = [(_type, addr, amount)]
-            is_sweep = bool(self.tx_external_keypairs)
             make_tx = lambda fee_est: \
                 self.wallet.make_unsigned_transaction(
                     self.get_coins(), outputs, self.config,
-                    fixed_fee=fee_est, is_sweep=is_sweep)
+                    fixed_fee=fee_est)
             try:
                 tx = make_tx(fee_estimator)
                 self.not_enough_funds = False
@@ -1449,14 +1448,14 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         r = self.read_send_tab()
         if not r:
             return
-        outputs, fee_estimator, tx_desc, coins = r
+        outputs, fee, tx_desc, coins = r
         try:
-            is_sweep = bool(self.tx_external_keypairs)
-            tx = self.wallet.make_unsigned_transaction(
-                coins, outputs, self.config, fixed_fee=fee_estimator,
-                is_sweep=is_sweep)
+            tx = self.wallet.make_unsigned_transaction(coins, outputs, self.config, fee)
         except NotEnoughFunds:
             self.show_message(_("Insufficient funds"))
+            return
+        except ExcessiveFee:
+            self.show_message(_("Your fee is too high.  Max is 50 sat/byte."))
             return
         except BaseException as e:
             traceback.print_exc(file=sys.stdout)
@@ -1466,9 +1465,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         amount = tx.output_value() if self.is_max else sum(map(lambda x:x[2], outputs))
         fee = tx.get_fee()
 
-        if fee < self.wallet.relayfee() * tx.estimated_size() / 1000 and tx.requires_fee(self.wallet):
-            self.show_error(_("This transaction requires a higher fee, or it will not be propagated by the network"))
-            return
+        # if fee < self.wallet.relayfee() * tx.estimated_size() / 1000 and tx.requires_fee(self.wallet):
+        #     self.show_error(_("This transaction requires a higher fee, or it will not be propagated by the network"))
+        #     return
 
         if preview:
             self.show_transaction(tx, tx_desc)

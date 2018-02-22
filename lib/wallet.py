@@ -568,7 +568,7 @@ class Abstract_Wallet(PrintError):
                     status = _('Unconfirmed')
                     if fee is None:
                         fee = self.tx_fees.get(tx_hash)
-                    if fee and self.network.config.has_fee_etas():
+                    if fee and self.network.config.has_fee_estimates():
                         size = tx.estimated_size()
                         fee_per_kb = fee * 1000 / size
                         exp_n = self.network.config.reverse_dynfee(fee_per_kb)
@@ -2146,6 +2146,7 @@ class Multisig_Wallet(Deterministic_Wallet):
         derivation = self.get_address_index(address)
         txin['x_pubkeys'] = [k.get_xpubkey(*derivation) for k in self.get_keystores()]
         # we need n place holders
+        txin['pubkeys'] = None
         txin['signatures'] = [None] * self.n
         txin['num_sig'] = self.m
 
