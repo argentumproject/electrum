@@ -63,7 +63,7 @@ def hash_header(header):
     if header.get('prev_block_hash') is None:
         header['prev_block_hash'] = '00'*32
     return hash_encode(Hash(bfh(serialize_header(header))))
-        
+
 blockchains = {}
 
 def read_blockchains(config):
@@ -77,11 +77,7 @@ def read_blockchains(config):
         checkpoint = int(filename.split('_')[2])
         parent_id = int(filename.split('_')[1])
         b = Blockchain(config, checkpoint, parent_id)
-        h = b.read_header(b.checkpoint)
-        if b.parent().can_connect(h, check_height=False):
-            blockchains[b.checkpoint] = b
-        else:
-            util.print_error("cannot connect", filename)
+        blockchains[b.checkpoint] = b
     return blockchains
 
 def check_header(header):
@@ -176,11 +172,6 @@ class Blockchain(util.PrintError):
             self.verify_header(header, prev_hash, target)
             prev_hash = hash_header(header)
 
-    def hash_header(self, header):
-        if header is None:
-            return '0' * 64
-        return hash_encode(Hash(self.serialize_header(header).decode('hex')))
-
     def path(self):
         d = util.get_headers_dir(self.config)
         filename = 'blockchain_headers' if self.parent_id is None else os.path.join('forks', 'fork_%d_%d'%(self.parent_id, self.checkpoint))
@@ -192,7 +183,7 @@ class Blockchain(util.PrintError):
         if d < 0:
             chunk = chunk[-d:]
             d = 0
-        self.write(chunk, d, index > len(self.checkpoints))
+        self.write(chunk, d)
         self.swap_with_parent()
 
     def swap_with_parent(self):
@@ -269,17 +260,7 @@ class Blockchain(util.PrintError):
         return deserialize_header(h, height)
 
     def get_hash(self, height):
-        if height == -1:
-            return '0000000000000000000000000000000000000000000000000000000000000000'
-        elif height == 0:
-            return bitcoin.NetworkConstants.GENESIS
-        elif height < len(self.checkpoints) * 2016:
-            assert (height+1) % 2016 == 0, height
-            index = height // 2016
-            h, t = self.checkpoints[index]
-            return h
-        else:
-            return hash_header(self.read_header(height))
+        return hash_header(self.read_header(height))
 
     def get_target(self, index):
         # compute target from chunk x, used in chunk x+1
