@@ -26,7 +26,7 @@
 import webbrowser
 import datetime
 
-from electrum_arg.wallet import UnrelatedTransactionException, TX_HEIGHT_LOCAL
+from electrum_arg.wallet import UnrelatedTransactionException
 from .util import *
 from electrum_arg.i18n import _
 from electrum_arg.util import block_explorer_URL
@@ -43,7 +43,6 @@ TX_ICONS = [
     "warning.png",
     "unconfirmed.png",
     "unconfirmed.png",
-    "offline_tx.png",
     "clock1.png",
     "clock2.png",
     "clock3.png",

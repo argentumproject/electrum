@@ -66,15 +66,10 @@ from .contacts import Contacts
 
 TX_STATUS = [
     _('Unconfirmed parent'),
+    _('Low fee'),
     _('Unconfirmed'),
     _('Not Verified'),
-    _('Local only'),
 ]
-
-TX_HEIGHT_LOCAL = -2
-TX_HEIGHT_UNCONF_PARENT = -1
-TX_HEIGHT_UNCONFIRMED = 0
-
 
 def relayfee(network):
     RELAY_FEE = 1000
@@ -151,7 +146,6 @@ def sweep(privkeys, network, config, recipient, fee=None, imax=100):
 
     tx = Transaction.from_io(inputs, outputs, locktime=locktime)
     tx.BIP_LI01_sort()
-    tx.set_rbf(True)
     tx.sign(keypairs)
     return tx
 
@@ -406,8 +400,7 @@ class Abstract_Wallet(PrintError):
         return self.get_pubkeys(*sequence)
 
     def add_unverified_tx(self, tx_hash, tx_height):
-        if tx_height in (TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_UNCONF_PARENT) \
-                and tx_hash in self.verified_tx:
+        if tx_height == 0 and tx_hash in self.verified_tx:
             self.verified_tx.pop(tx_hash)
             if self.verifier:
                 self.verifier.merkle_roots.pop(tx_hash, None)
@@ -447,18 +440,15 @@ class Abstract_Wallet(PrintError):
         return self.network.get_local_height() if self.network else self.storage.get('stored_height', 0)
 
     def get_tx_height(self, tx_hash):
-        """ Given a transaction, returns (height, conf, timestamp) """
+        """ return the height and timestamp of a verified transaction. """
         with self.lock:
             if tx_hash in self.verified_tx:
                 height, timestamp, pos = self.verified_tx[tx_hash]
                 conf = max(self.get_local_height() - height + 1, 0)
                 return height, conf, timestamp
-            elif tx_hash in self.unverified_tx:
+            else:
                 height = self.unverified_tx[tx_hash]
                 return height, 0, False
-            else:
-                # local transaction
-                return TX_HEIGHT_LOCAL, 0, False
 
     def get_txpos(self, tx_hash):
         "return position, even if the tx is unverified"
@@ -564,7 +554,7 @@ class Abstract_Wallet(PrintError):
                         status = _("{} confirmations").format(conf)
                     else:
                         status = _('Not verified')
-                elif height in (TX_HEIGHT_UNCONF_PARENT, TX_HEIGHT_UNCONFIRMED):
+                else:
                     status = _('Unconfirmed')
                     if fee is None:
                         fee = self.tx_fees.get(tx_hash)
@@ -751,79 +741,35 @@ class Abstract_Wallet(PrintError):
             return conflicting_txns
 
     def add_transaction(self, tx_hash, tx):
+        is_coinbase = tx.inputs()[0]['type'] == 'coinbase'
         with self.transaction_lock:
-            # NOTE: returning if tx in self.transactions might seem like a good idea
-            # BUT we track is_mine inputs in a txn, and during subsequent calls
-            # of add_transaction tx, we might learn of more-and-more inputs of
-            # being is_mine, as we roll the gap_limit forward
-            is_coinbase = tx.inputs()[0]['type'] == 'coinbase'
-            tx_height = self.get_tx_height(tx_hash)[0]
-            is_mine = any([self.is_mine(txin['address']) for txin in tx.inputs()])
-            # do not save if tx is local and not mine
-            if tx_height == TX_HEIGHT_LOCAL and not is_mine:
-                # FIXME the test here should be for "not all is_mine"; cannot detect conflict in some cases
-                return False
-            # raise exception if unrelated to wallet
-            is_for_me = any([self.is_mine(self.get_txout_address(txo)) for txo in tx.outputs()])
-            if not is_mine and not is_for_me:
-                raise UnrelatedTransactionException()
-            # Find all conflicting transactions.
-            # In case of a conflict,
-            #     1. confirmed > mempool > local
-            #     2. this new txn has priority over existing ones
-            # When this method exits, there must NOT be any conflict, so
-            # either keep this txn and remove all conflicting (along with dependencies)
-            #     or drop this txn
-            conflicting_txns = self.get_conflicting_transactions(tx)
-            if conflicting_txns:
-                existing_mempool_txn = any(
-                    self.get_tx_height(tx_hash2)[0] in (TX_HEIGHT_UNCONFIRMED, TX_HEIGHT_UNCONF_PARENT)
-                    for tx_hash2 in conflicting_txns)
-                existing_confirmed_txn = any(
-                    self.get_tx_height(tx_hash2)[0] > 0
-                    for tx_hash2 in conflicting_txns)
-                if existing_confirmed_txn and tx_height <= 0:
-                    # this is a non-confirmed tx that conflicts with confirmed txns; drop.
-                    return False
-                if existing_mempool_txn and tx_height == TX_HEIGHT_LOCAL:
-                    # this is a local tx that conflicts with non-local txns; drop.
-                    return False
-                # keep this txn and remove all conflicting
-                to_remove = set()
-                to_remove |= conflicting_txns
-                for conflicting_tx_hash in conflicting_txns:
-                    to_remove |= self.get_depending_transactions(conflicting_tx_hash)
-                for tx_hash2 in to_remove:
-                    self.remove_transaction(tx_hash2)
             # add inputs
             self.txi[tx_hash] = d = {}
             for txi in tx.inputs():
-                addr = self.get_txin_address(txi)
+                addr = txi.get('address')
                 if txi['type'] != 'coinbase':
                     prevout_hash = txi['prevout_hash']
                     prevout_n = txi['prevout_n']
                     ser = prevout_hash + ':%d'%prevout_n
                 # find value from prev output
-                if addr and self.is_mine(addr):
+                if self.is_mine(addr):
                     dd = self.txo.get(prevout_hash, {})
                     for n, v, is_cb in dd.get(addr, []):
                         if n == prevout_n:
                             if d.get(addr) is None:
                                 d[addr] = []
                             d[addr].append((ser, v))
-                            # we only track is_mine spends
-                            self.spent_outpoints[ser] = tx_hash
                             break
                     else:
                         self.pruned_txo[ser] = tx_hash
+
             # add outputs
             self.txo[tx_hash] = d = {}
             for n, txo in enumerate(tx.outputs()):
-                v = txo[2]
                 ser = tx_hash + ':%d'%n
-                addr = self.get_txout_address(txo)
-                if addr and self.is_mine(addr):
-                    if d.get(addr) is None:
+                _type, addr, v = txo
+                if self.is_mine(addr):
+                    if not addr in d:
                         d[addr] = []
                     d[addr].append((n, v, is_coinbase))
                 # give v to txi that spends me
@@ -836,7 +782,6 @@ class Abstract_Wallet(PrintError):
                     dd[addr].append((ser, v))
             # save
             self.transactions[tx_hash] = tx
-            return True
 
     def remove_transaction(self, tx_hash):
         def undo_spend(outpoint_to_txid_map):
