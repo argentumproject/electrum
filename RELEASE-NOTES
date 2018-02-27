@@ -1,3 +1,8 @@
+# Release 2.9.3.1
+  * disable jsonrpc commands in the GUI 
+  * Password protect the JSONRPC interface
+  * Stop allowing CORS for the JSON-RPC server 
+  
 # Release 2.9.3
   * fix configuration file issue #2719
   * fix ledger signing of non-RBF transactions
