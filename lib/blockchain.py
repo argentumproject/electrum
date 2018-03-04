@@ -177,7 +177,7 @@ class Blockchain(util.PrintError):
         if d < 0:
             chunk = chunk[-d:]
             d = 0
-        self.write(chunk, d, index > len(self.checkpoints))
+        self.write(chunk, d)
         self.swap_with_parent()
 
     def swap_with_parent(self):
@@ -254,12 +254,7 @@ class Blockchain(util.PrintError):
         return deserialize_header(h, height)
 
     def get_hash(self, height):
-        if height == -1:
-            return '0000000000000000000000000000000000000000000000000000000000000000'
-        elif height == 0:
-            return bitcoin.NetworkConstants.GENESIS
-        else:
-            return hash_header(self.read_header(height))
+        return hash_header(self.read_header(height))
 
     def get_target(self, index):
         # compute target from chunk x, used in chunk x+1
