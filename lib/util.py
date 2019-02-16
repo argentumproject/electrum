@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-#
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2011 Thomas Voegtlin
 #
@@ -23,29 +21,48 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import os, sys, re, json
-import platform
-import shutil
+import binascii
+import os, sys, re, json, time
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 import traceback
-import urlparse
-import urllib
 import threading
-from i18n import _
+import hmac
+import stat
+import inspect, weakref
 
-base_units = {'BTC':8, 'mBTC':5, 'uBTC':2}
+from .i18n import _
+
+import queue
+
+def inv_dict(d):
+    return {v: k for k, v in d.items()}
+
+
+base_units = {'BCH':8, 'mBCH':5, 'cash':2}
 fee_levels = [_('Within 25 blocks'), _('Within 10 blocks'), _('Within 5 blocks'), _('Within 2 blocks'), _('In the next block')]
 
-def normalize_version(v):
-    return [int(x) for x in re.sub(r'(\.0+)*$','', v).split(".")]
-
 class NotEnoughFunds(Exception): pass
+
+class ExcessiveFee(Exception): pass
 
 class InvalidPassword(Exception):
     def __str__(self):
         return _("Incorrect password")
+
+
+class FileImportFailed(Exception):
+    def __str__(self):
+        return _("Failed to import file.")
+
+
+class FileImportFailedEncrypted(FileImportFailed):
+    def __str__(self):
+        return (_('Failed to import file.') + ' ' +
+                _('Perhaps it is encrypted...') + '\n' +
+                _('Importing encrypted files is not supported.'))
+
 
 # Throw this exception to unwind the stack like when an error occurs.
 # However unlike other exceptions the user won't be informed.
@@ -55,7 +72,7 @@ class UserCancelled(Exception):
 
 class MyEncoder(json.JSONEncoder):
     def default(self, obj):
-        from transaction import Transaction
+        from .transaction import Transaction
         if isinstance(obj, Transaction):
             return obj.as_dict()
         return super(MyEncoder, self).default(obj)
@@ -66,7 +83,11 @@ class PrintError(object):
         return self.__class__.__name__
 
     def print_error(self, *msg):
+        # only prints with --verbose flag
         print_error("[%s]" % self.diagnostic_name(), *msg)
+
+    def print_stderr(self, *msg):
+        print_stderr("[%s]" % self.diagnostic_name(), *msg)
 
     def print_msg(self, *msg):
         print_msg("[%s]" % self.diagnostic_name(), *msg)
@@ -128,7 +149,7 @@ class DaemonThread(threading.Thread, PrintError):
             for job in self.jobs:
                 try:
                     job.run()
-                except:
+                except Exception as e:
                     traceback.print_exc(file=sys.stderr)
 
     def remove_jobs(self, jobs):
@@ -151,20 +172,42 @@ class DaemonThread(threading.Thread, PrintError):
 
     def on_stop(self):
         if 'ANDROID_DATA' in os.environ:
-            import jnius
-            jnius.detach()
-            self.print_error("jnius detach")
+            try:
+                import jnius
+                jnius.detach()
+                self.print_error("jnius detach")
+            except ImportError:
+                pass  # Chaquopy detaches automatically.
         self.print_error("stopped")
 
 
-is_verbose = False
-def set_verbosity(b):
-    global is_verbose
+# TODO: disable
+is_verbose = True
+verbose_timestamps = True
+def set_verbosity(b, *, timestamps=True):
+    global is_verbose, verbose_timestamps
     is_verbose = b
+    verbose_timestamps = timestamps
 
+# Method decorator.  To be used for calculations that will always
+# deliver the same result.  The method cannot take any arguments
+# and should be accessed as an attribute.
+class cachedproperty(object):
 
+    def __init__(self, f):
+        self.f = f
+
+    def __get__(self, obj, type):
+        obj = obj or type
+        value = self.f(obj)
+        setattr(obj, self.f.__name__, value)
+        return value
+
+_t0 = time.time()
 def print_error(*args):
     if not is_verbose: return
+    if verbose_timestamps:
+        args = ("|%7.3f|"%(time.time() - _t0), *args)
     print_stderr(*args)
 
 def print_stderr(*args):
@@ -187,101 +230,216 @@ def json_encode(obj):
 
 def json_decode(x):
     try:
-        return json.loads(x, parse_float=decimal.Decimal)
+        return json.loads(x, parse_float=Decimal)
     except:
         return x
 
+
+# taken from Django Source Code
+def constant_time_compare(val1, val2):
+    """Return True if the two strings are equal, False otherwise."""
+    return hmac.compare_digest(to_bytes(val1, 'utf8'), to_bytes(val2, 'utf8'))
+
+
 # decorator that prints execution time
 def profiler(func):
-    def do_profile(func, args, kw_args):
-        n = func.func_name
+    def do_profile(args, kw_args):
         t0 = time.time()
         o = func(*args, **kw_args)
         t = time.time() - t0
-        print_error("[profiler]", n, "%.4f"%t)
+        print_error("[profiler]", func.__qualname__, "%.4f"%t)
         return o
-    return lambda *args, **kw_args: do_profile(func, args, kw_args)
+    return lambda *args, **kw_args: do_profile(args, kw_args)
 
 
 def android_ext_dir():
-    import jnius
-    env = jnius.autoclass('android.os.Environment')
+    try:
+        import jnius
+        env = jnius.autoclass('android.os.Environment')
+    except ImportError:
+        from android.os import Environment as env  # Chaquopy import hook
     return env.getExternalStorageDirectory().getPath()
 
 def android_data_dir():
-    import jnius
-    PythonActivity = jnius.autoclass('org.kivy.android.PythonActivity')
-    return PythonActivity.mActivity.getFilesDir().getPath() + '/data'
+    try:
+        import jnius
+        context = jnius.autoclass('org.kivy.android.PythonActivity').mActivity
+    except ImportError:
+        from com.chaquo.python import Python
+        context = Python.getPlatform().getApplication()
+    return context.getFilesDir().getPath() + '/data'
 
-def android_headers_path():
-    path = android_ext_dir() + '/org.electrum.electrum/blockchain_headers'
-    d = os.path.dirname(path)
-    if not os.path.exists(d):
-        os.mkdir(d)
+def android_headers_dir():
+    try:
+        import jnius
+        d = android_ext_dir() + '/org.electron.electron'
+        if not os.path.exists(d):
+            os.mkdir(d)
+        return d
+    except ImportError:
+        return android_data_dir()
+
+def ensure_sparse_file(filename):
+    if os.name == "nt":
+        try:
+            os.system("fsutil sparse setFlag \""+ filename +"\" 1")
+        except:
+            pass
+
+def get_headers_dir(config):
+    return android_headers_dir() if 'ANDROID_DATA' in os.environ else config.path
+
+def assert_datadir_available(config_path):
+    path = config_path
+    if os.path.exists(path):
+        return
+    else:
+        raise FileNotFoundError(
+            'Electron Cash datadir does not exist. Was it deleted while running?' + '\n' +
+            'Should be at {}'.format(path))
+
+def assert_file_in_datadir_available(path, config_path):
+    if os.path.exists(path):
+        return
+    else:
+        assert_datadir_available(config_path)
+        raise FileNotFoundError(
+            'Cannot find file but datadir is there.' + '\n' +
+            'Should be at {}'.format(path))
+
+def standardize_path(path):
+    if path is not None:
+        path = os.path.normcase(os.path.realpath(os.path.abspath(path)))
     return path
 
-def android_check_data_dir():
-    """ if needed, move old directory to sandbox """
-    ext_dir = android_ext_dir()
-    data_dir = android_data_dir()
-    old_electrum_dir = ext_dir + '/electrum'
-    if not os.path.exists(data_dir) and os.path.exists(old_electrum_dir):
-        import shutil
-        new_headers_path = android_headers_path()
-        old_headers_path = old_electrum_dir + '/blockchain_headers'
-        if not os.path.exists(new_headers_path) and os.path.exists(old_headers_path):
-            print_error("Moving headers file to", new_headers_path)
-            shutil.move(old_headers_path, new_headers_path)
-        print_error("Moving data to", data_dir)
-        shutil.move(old_electrum_dir, data_dir)
-    return data_dir
+def get_new_wallet_name(wallet_folder: str) -> str:
+    i = 1
+    while True:
+        filename = "wallet_%d" % i
+        if os.path.exists(os.path.join(wallet_folder, filename)):
+            i += 1
+        else:
+            break
+    return filename
 
-def get_headers_path(config):
-    if 'ANDROID_DATA' in os.environ:
-        return android_headers_path()
+def assert_bytes(*args):
+    """
+    porting helper, assert args type
+    """
+    try:
+        for x in args:
+            assert isinstance(x, (bytes, bytearray))
+    except:
+        print('assert bytes failed', list(map(type, args)))
+        raise
+
+
+def assert_str(*args):
+    """
+    porting helper, assert args type
+    """
+    for x in args:
+        assert isinstance(x, str)
+
+
+
+def to_string(x, enc):
+    if isinstance(x, (bytes, bytearray)):
+        return x.decode(enc)
+    if isinstance(x, str):
+        return x
     else:
-        return os.path.join(config.path, 'blockchain_headers')
+        raise TypeError("Not a string or bytes like object")
 
-def user_dir():
-    if "HOME" in os.environ:
-        return os.path.join(os.environ["HOME"], ".electrum")
-    elif "APPDATA" in os.environ:
-        return os.path.join(os.environ["APPDATA"], "Electrum")
-    elif "LOCALAPPDATA" in os.environ:
-        return os.path.join(os.environ["LOCALAPPDATA"], "Electrum")
-    elif 'ANDROID_DATA' in os.environ:
-        return android_check_data_dir()
+def to_bytes(something, encoding='utf8'):
+    """
+    cast string to bytes() like object, but for python2 support it's bytearray copy
+    """
+    if isinstance(something, bytes):
+        return something
+    if isinstance(something, str):
+        return something.encode(encoding)
+    elif isinstance(something, bytearray):
+        return bytes(something)
+    else:
+        raise TypeError("Not a string or bytes like object")
+
+
+bfh = bytes.fromhex
+hfu = binascii.hexlify
+
+def bh2u(x):
+    """
+    str with hex representation of a bytes-like object
+
+    >>> x = bytes((1, 2, 10))
+    >>> bh2u(x)
+    '01020A'
+
+    :param x: bytes
+    :rtype: str
+    """
+    return hfu(x).decode('ascii')
+
+
+def user_dir(prefer_local=False):
+    if 'ANDROID_DATA' in os.environ:
+        return android_data_dir()
+    elif os.name == 'posix' and "HOME" in os.environ:
+        return os.path.join(os.environ["HOME"], ".electron-cash" )
+    elif "APPDATA" in os.environ or "LOCALAPPDATA" in os.environ:
+        app_dir = os.environ.get("APPDATA")
+        localapp_dir = os.environ.get("LOCALAPPDATA")
+        # Prefer APPDATA, but may get LOCALAPPDATA if present and req'd.
+        if localapp_dir is not None and prefer_local or app_dir is None:
+            app_dir = localapp_dir
+        return os.path.join(app_dir, "ElectronCash")
     else:
         #raise Exception("No home directory found in environment variables.")
         return
 
+
+def make_dir(path):
+    # Make directory if it does not yet exist.
+    if not os.path.exists(path):
+        if os.path.islink(path):
+            raise BaseException('Dangling link: ' + path)
+        os.mkdir(path)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+
+
 def format_satoshis_plain(x, decimal_point = 8):
-    '''Display a satoshi amount scaled.  Always uses a '.' as a decimal
-    point and has no thousands separator'''
+    """Display a satoshi amount scaled.  Always uses a '.' as a decimal
+    point and has no thousands separator"""
     scale_factor = pow(10, decimal_point)
     return "{:.8f}".format(Decimal(x) / scale_factor).rstrip('0').rstrip('.')
 
-def format_satoshis(x, is_diff=False, num_zeros = 0, decimal_point = 8, whitespaces=False):
+
+def format_satoshis(x, num_zeros=0, decimal_point=8, precision=None, is_diff=False, whitespaces=False):
     from locale import localeconv
     if x is None:
         return 'unknown'
-    x = int(x)  # Some callers pass Decimal
-    scale_factor = pow (10, decimal_point)
-    integer_part = "{:n}".format(int(abs(x) / scale_factor))
-    if x < 0:
-        integer_part = '-' + integer_part
-    elif is_diff:
-        integer_part = '+' + integer_part
+    if precision is None:
+        precision = decimal_point
+    decimal_format = ".0" + str(precision) if precision > 0 else ""
+    if is_diff:
+        decimal_format = '+' + decimal_format
+    try:
+        result = ("{:" + decimal_format + "f}").format(x / pow (10, decimal_point)).rstrip('0')
+    except ArithmeticError:
+        return 'unknown' # Normally doesn't happen but if x is a huge int, we may get OverflowError or other ArithmeticError subclass exception. See #1024
+    integer_part, fract_part = result.split(".")
     dp = localeconv()['decimal_point']
-    fract_part = ("{:0" + str(decimal_point) + "}").format(abs(x) % scale_factor)
-    fract_part = fract_part.rstrip('0')
     if len(fract_part) < num_zeros:
         fract_part += "0" * (num_zeros - len(fract_part))
     result = integer_part + dp + fract_part
     if whitespaces:
         result += " " * (decimal_point - len(fract_part))
         result = " " * (15 - len(result)) + result
-    return result.decode('utf8')
+    return result
+
+def format_fee_satoshis(fee, num_zeros=0):
+    return format_satoshis(fee, num_zeros, 0, precision=num_zeros)
 
 def timestamp_to_datetime(timestamp):
     try:
@@ -290,8 +448,11 @@ def timestamp_to_datetime(timestamp):
         return None
 
 def format_time(timestamp):
-    date = timestamp_to_datetime(timestamp)
-    return date.isoformat(' ')[:-3] if date else _("Unknown")
+    if timestamp:
+        date = timestamp_to_datetime(timestamp)
+        if date:
+            return date.isoformat(' ')[:-3]
+    return _("Unknown")
 
 
 # Takes a timestamp and returns a string with the approximation of the age
@@ -347,173 +508,74 @@ def time_difference(distance_in_time, include_seconds):
     else:
         return "over %d years" % (round(distance_in_minutes / 525600))
 
-block_explorer_info = {
-    'Biteasy.com': ('https://www.biteasy.com/blockchain',
-                        {'tx': 'transactions', 'addr': 'addresses'}),
-    'Bitflyer.jp': ('https://chainflyer.bitflyer.jp',
-                        {'tx': 'Transaction', 'addr': 'Address'}),
-    'Blockchain.info': ('https://blockchain.info',
-                        {'tx': 'tx', 'addr': 'address'}),
-    'blockchainbdgpzk.onion': ('https://blockchainbdgpzk.onion',
-                        {'tx': 'tx', 'addr': 'address'}),
-    'Blockr.io': ('https://btc.blockr.io',
-                        {'tx': 'tx/info', 'addr': 'address/info'}),
-    'Blocktrail.com': ('https://www.blocktrail.com/BTC',
-                        {'tx': 'tx', 'addr': 'address'}),
-    'BTC.com': ('https://chain.btc.com',
-                        {'tx': 'tx', 'addr': 'address'}),
-    'Chain.so': ('https://www.chain.so',
-                        {'tx': 'tx/BTC', 'addr': 'address/BTC'}),
-    'Insight.is': ('https://insight.bitpay.com',
-                        {'tx': 'tx', 'addr': 'address'}),
-    'TradeBlock.com': ('https://tradeblock.com/blockchain',
-                        {'tx': 'tx', 'addr': 'address'}),
-    'system default': ('blockchain:',
-                        {'tx': 'tx', 'addr': 'address'}),
-}
-
-def block_explorer(config):
-    return config.get('block_explorer', 'Blockchain.info')
-
-def block_explorer_tuple(config):
-    return block_explorer_info.get(block_explorer(config))
-
-def block_explorer_URL(config, kind, item):
-    be_tuple = block_explorer_tuple(config)
-    if not be_tuple:
-        return
-    kind_str = be_tuple[1].get(kind)
-    if not kind_str:
-        return
-    url_parts = [be_tuple[0], kind_str, item]
-    return "/".join(url_parts)
-
-# URL decode
-#_ud = re.compile('%([0-9a-hA-H]{2})', re.MULTILINE)
-#urldecode = lambda x: _ud.sub(lambda m: chr(int(m.group(1), 16)), x)
-
-def parse_URI(uri, on_pr=None):
-    import bitcoin
-    from bitcoin import COIN
-
-    if ':' not in uri:
-        if not bitcoin.is_address(uri):
-            raise BaseException("Not a bitcoin address")
-        return {'address': uri}
-
-    u = urlparse.urlparse(uri)
-    if u.scheme != 'bitcoin':
-        raise BaseException("Not a bitcoin URI")
-    address = u.path
-
-    # python for android fails to parse query
-    if address.find('?') > 0:
-        address, query = u.path.split('?')
-        pq = urlparse.parse_qs(query)
-    else:
-        pq = urlparse.parse_qs(u.query)
-
-    for k, v in pq.items():
-        if len(v)!=1:
-            raise Exception('Duplicate Key', k)
-
-    out = {k: v[0] for k, v in pq.items()}
-    if address:
-        if not bitcoin.is_address(address):
-            raise BaseException("Invalid bitcoin address:" + address)
-        out['address'] = address
-    if 'amount' in out:
-        am = out['amount']
-        m = re.match('([0-9\.]+)X([0-9])', am)
-        if m:
-            k = int(m.group(2)) - 8
-            amount = Decimal(m.group(1)) * pow(  Decimal(10) , k)
-        else:
-            amount = Decimal(am) * COIN
-        out['amount'] = int(amount)
-    if 'message' in out:
-        out['message'] = out['message'].decode('utf8')
-        out['memo'] = out['message']
-    if 'time' in out:
-        out['time'] = int(out['time'])
-    if 'exp' in out:
-        out['exp'] = int(out['exp'])
-    if 'sig' in out:
-        out['sig'] = bitcoin.base_decode(out['sig'], None, base=58).encode('hex')
-
-    r = out.get('r')
-    sig = out.get('sig')
-    name = out.get('name')
-    if r or (name and sig):
-        def get_payment_request_thread():
-            import paymentrequest as pr
-            if name and sig:
-                s = pr.serialize_request(out).SerializeToString()
-                request = pr.PaymentRequest(s)
-            else:
-                request = pr.get_payment_request(r)
-            on_pr(request)
-        t = threading.Thread(target=get_payment_request_thread)
-        t.setDaemon(True)
-        t.start()
-
-    return out
-
-
-def create_URI(addr, amount, message):
-    import bitcoin
-    if not bitcoin.is_address(addr):
-        return ""
-    query = []
-    if amount:
-        query.append('amount=%s'%format_satoshis_plain(amount))
-    if message:
-        if type(message) == unicode:
-            message = message.encode('utf8')
-        query.append('message=%s'%urllib.quote(message))
-    p = urlparse.ParseResult(scheme='bitcoin', netloc='', path=addr, params='', query='&'.join(query), fragment='')
-    return urlparse.urlunparse(p)
-
-
 # Python bug (http://bugs.python.org/issue1927) causes raw_input
 # to be redirected improperly between stdin/stderr on Unix systems
+#TODO: py3
 def raw_input(prompt=None):
     if prompt:
         sys.stdout.write(prompt)
     return builtin_raw_input()
-import __builtin__
-builtin_raw_input = __builtin__.raw_input
-__builtin__.raw_input = raw_input
 
+import builtins
+builtin_raw_input = builtins.input
+builtins.input = raw_input
 
 
 def parse_json(message):
-    n = message.find('\n')
+    # TODO: check \r\n pattern
+    n = message.find(b'\n')
     if n==-1:
         return None, message
     try:
-        j = json.loads( message[0:n] )
+        j = json.loads(message[0:n].decode('utf8'))
     except:
         j = None
     return j, message[n+1:]
 
 
-
-
 class timeout(Exception):
+    ''' Server timed out on broadcast tx (normally due to a bad connection).
+    Exception string is the translated error string.'''
+    pass
+
+TimeoutException = timeout # Future compat. with Electrum codebase/cherrypicking
+
+class ServerError(Exception):
+    ''' Note exception string is the translated, gui-friendly error message.
+    self.server_msg may be a dict or a string containing the raw response from
+    the server.  Do NOT display self.server_msg in GUI code due to potential for
+    phishing attacks from the untrusted server.
+    See: https://github.com/spesmilo/electrum/issues/4968  '''
+    def __init__(self, msg, server_msg = None):
+        super().__init__(msg)
+        self.server_msg = server_msg or '' # prefer empty string if none supplied
+
+class ServerErrorResponse(ServerError):
+    ''' Raised by network.py broadcast_transaction2() when the server sent an
+    error response. The actual server error response is contained in a dict
+    and/or str in self.server_msg. Warning: DO NOT display the server text.
+    Displaying server text harbors a phishing risk. Instead, a translated
+    GUI-friendly 'deduced' response is in the exception string.
+    See: https://github.com/spesmilo/electrum/issues/4968 '''
+    pass
+
+class TxHashMismatch(ServerError):
+    ''' Raised by network.py broadcast_transaction2().
+    Server sent an OK response but the txid it supplied does not match our
+    signed tx id that we requested to broadcast. The txid returned is
+    stored in self.server_msg. It's advised not to display
+    the txid response as there is also potential for phishing exploits if
+    one does. Instead, the exception string contians a suitable translated
+    GUI-friendly error message. '''
     pass
 
 import socket
-import errno
-import json
 import ssl
-import time
 
-class SocketPipe:
-
+class SocketPipe(PrintError):
     def __init__(self, socket):
         self.socket = socket
-        self.message = ''
+        self.message = b''
         self.set_timeout(0.1)
         self.recv_time = time.time()
 
@@ -534,19 +596,19 @@ class SocketPipe:
                 raise timeout
             except ssl.SSLError:
                 raise timeout
-            except socket.error, err:
+            except socket.error as err:
                 if err.errno == 60:
                     raise timeout
                 elif err.errno in [11, 35, 10035]:
-                    print_error("socket errno %d (resource temporarily unavailable)"% err.errno)
+                    self.print_error("socket errno %d (resource temporarily unavailable)"% err.errno)
                     time.sleep(0.2)
                     raise timeout
                 else:
-                    print_error("pipe: socket error", err)
-                    data = ''
+                    self.print_error("socket error:", err)
+                    data = b''
             except:
                 traceback.print_exc(file=sys.stderr)
-                data = ''
+                data = b''
 
             if not data:  # Connection closed remotely
                 return None
@@ -555,123 +617,131 @@ class SocketPipe:
 
     def send(self, request):
         out = json.dumps(request) + '\n'
+        out = out.encode('utf8')
         self._send(out)
 
     def send_all(self, requests):
-        out = ''.join(map(lambda x: json.dumps(x) + '\n', requests))
+        out = b''.join(map(lambda x: (json.dumps(x) + '\n').encode('utf8'), requests))
         self._send(out)
 
     def _send(self, out):
         while out:
+            sent = self.socket.send(out)
+            out = out[sent:]
+
+
+def setup_thread_excepthook():
+    """
+    Workaround for `sys.excepthook` thread bug from:
+    http://bugs.python.org/issue1230540
+
+    Call once from the main thread before creating any threads.
+    """
+
+    init_original = threading.Thread.__init__
+
+    def init(self, *args, **kwargs):
+
+        init_original(self, *args, **kwargs)
+        run_original = self.run
+
+        def run_with_except_hook(*args2, **kwargs2):
             try:
-                sent = self.socket.send(out)
-                out = out[sent:]
-            except ssl.SSLError as e:
-                print_error("SSLError:", e)
-                time.sleep(0.1)
-                continue
-            except socket.error as e:
-                if e[0] in (errno.EWOULDBLOCK,errno.EAGAIN):
-                    print_error("EAGAIN: retrying")
-                    time.sleep(0.1)
-                    continue
-                elif e[0] in ['timed out', 'The write operation timed out']:
-                    print_error("socket timeout, retry")
-                    time.sleep(0.1)
-                    continue
-                else:
-                    traceback.print_exc(file=sys.stdout)
-                    raise e
+                run_original(*args2, **kwargs2)
+            except Exception:
+                sys.excepthook(*sys.exc_info())
+
+        self.run = run_with_except_hook
+
+    threading.Thread.__init__ = init
 
 
-
-import Queue
-
-class QueuePipe:
-
-    def __init__(self, send_queue=None, get_queue=None):
-        self.send_queue = send_queue if send_queue else Queue.Queue()
-        self.get_queue = get_queue if get_queue else Queue.Queue()
-        self.set_timeout(0.1)
-
-    def get(self):
-        try:
-            return self.get_queue.get(timeout=self.timeout)
-        except Queue.Empty:
-            raise timeout
-
-    def get_all(self):
-        responses = []
-        while True:
-            try:
-                r = self.get_queue.get_nowait()
-                responses.append(r)
-            except Queue.Empty:
-                break
-        return responses
-
-    def set_timeout(self, t):
-        self.timeout = t
-
-    def send(self, request):
-        self.send_queue.put(request)
-
-    def send_all(self, requests):
-        for request in requests:
-            self.send(request)
+def versiontuple(v):
+    return tuple(map(int, (v.split("."))))
 
 
+class Weak:
+    '''
+    Weak reference factory. Create either a weak proxy to a bound method
+    or a weakref.proxy, depending on whether this factory class's __new__ is
+    invoked with a bound method or a regular function/object as its first
+    argument.
 
-class StoreDict(dict):
+    If used with an object/function reference this factory just creates a
+    weakref.proxy and returns that.
 
-    def __init__(self, config, name):
-        self.config = config
-        self.path = os.path.join(self.config.path, name)
-        self.load()
+        myweak = Weak(myobj)
+        type(myweak) == weakref.proxy # <-- True
 
-    def load(self):
-        try:
-            with open(self.path, 'r') as f:
-                self.update(json.loads(f.read()))
-        except:
-            pass
+    The interesting usage is when this factory is used with a bound method
+    instance.  In which case it returns a MethodProxy which behaves like
+    a proxy to a bound method in that you can call the MethodProxy object
+    directly:
 
-    def save(self):
-        with open(self.path, 'w') as f:
-            s = json.dumps(self, indent=4, sort_keys=True)
-            r = f.write(s)
+        mybound = Weak(someObj.aMethod)
+        mybound(arg1, arg2) # <-- invokes someObj.aMethod(arg1, arg2)
 
-    def __setitem__(self, key, value):
-        dict.__setitem__(self, key, value)
-        self.save()
+    This is unlike regular weakref.WeakMethod which is not a proxy and requires
+    unsightly `foo()(args)`, or perhaps `foo() and foo()(args)` idioms.
 
-    def pop(self, key):
-        if key in self.keys():
-            dict.pop(self, key)
-            self.save()
+    Also note that no exception is raised with MethodProxy instances when
+    calling them on dead references.
 
+    Instead, if the weakly bound method is no longer alive (because its object
+    died), the situation is ignored as if no method were called (with an
+    optional print facility provided to print debug information in such a
+    situation).
 
+    The optional `print_func` class attribute can be set in MethodProxy
+    globally or for each instance specifically in order to specify a debug
+    print function (which will receive exactly two arguments: the
+    MethodProxy instance and an info string), so you can track when your weak
+    bound method is being called after its object died (defaults to
+    `print_error`).
 
+    Note you may specify a second postional argument to this factory,
+    `callback`, which is identical to the `callback` argument in the weakref
+    documentation and will be called on target object finalization
+    (destruction).
 
-def check_www_dir(rdir):
-    import urllib, urlparse, shutil, os
-    if not os.path.exists(rdir):
-        os.mkdir(rdir)
-    index = os.path.join(rdir, 'index.html')
-    if not os.path.exists(index):
-        print_error("copying index.html")
-        src = os.path.join(os.path.dirname(__file__), 'www', 'index.html')
-        shutil.copy(src, index)
-    files = [
-        "https://code.jquery.com/jquery-1.9.1.min.js",
-        "https://raw.githubusercontent.com/davidshimjs/qrcodejs/master/qrcode.js",
-        "https://code.jquery.com/ui/1.10.3/jquery-ui.js",
-        "https://code.jquery.com/ui/1.10.3/themes/smoothness/jquery-ui.css"
-    ]
-    for URL in files:
-        path = urlparse.urlsplit(URL).path
-        filename = os.path.basename(path)
-        path = os.path.join(rdir, filename)
-        if not os.path.exists(path):
-            print_error("downloading ", URL)
-            urllib.urlretrieve(URL, path)
+    This usage/idiom is intented to be used with Qt's signal/slots mechanism
+    to allow for Qt bound signals to not prevent target objects from being
+    garbage collected due to reference cycles -- hence the permissive,
+    exception-free design.'''
+
+    def __new__(cls, obj_or_bound_method, *args, **kwargs):
+        if inspect.ismethod(obj_or_bound_method):
+            # is a method -- use our custom proxy class
+            return cls.MethodProxy(obj_or_bound_method, *args, **kwargs)
+        else:
+            # Not a method, just return a weakref.proxy
+            return weakref.proxy(obj_or_bound_method, *args, **kwargs)
+
+    ref = weakref.ref # alias for convenience so you don't have to import weakref
+    Set = weakref.WeakSet # alias for convenience
+    ValueDictionary = weakref.WeakValueDictionary # alias for convenience
+    KeyDictionary = weakref.WeakKeyDictionary # alias for convenience
+    Method = weakref.WeakMethod # alias
+    finalize = weakref.finalize # alias
+
+    class MethodProxy(weakref.WeakMethod):
+        ''' Direct-use of this class is discouraged (aside from assigning to
+            its print_func attribute). Instead use of the wrapper class 'Weak'
+            defined in the enclosing scope is encouraged. '''
+
+        print_func = lambda x, this, info: print_error(this, info) # <--- set this attribute if needed, either on the class or instance level, to control debug printing behavior. None is ok here.
+
+        def __init__(self, meth, *args, **kwargs):
+            super().__init__(meth, *args, **kwargs)
+            # teehee.. save some information about what to call this thing for debug print purposes
+            self.qname, self.sname = meth.__qualname__, str(meth.__self__)
+    
+        def __call__(self, *args, **kwargs):
+            ''' Either directly calls the method for you or prints debug info
+                if the target object died '''
+            meth = super().__call__() # if dead, None is returned
+            if meth: # could also do callable() as the test but hopefully this is sightly faster
+                return meth(*args,**kwargs)
+            elif callable(self.print_func):
+                self.print_func(self, "MethodProxy for '{}' called on a dead reference. Referent was: {})".format(self.qname,
+                                                                                                                  self.sname))

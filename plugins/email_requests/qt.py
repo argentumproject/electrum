@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - Lightweight Bitcoin Client
 # Copyright (C) 2015 Thomas Voegtlin
@@ -23,8 +23,6 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from __future__ import absolute_import
-
 import time
 import threading
 import base64
@@ -33,21 +31,21 @@ from functools import partial
 import smtplib
 import imaplib
 import email
-from email.MIMEMultipart import MIMEMultipart
-from email.MIMEBase import MIMEBase
-from email import Encoders
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.encoders import encode_base64
 
-from PyQt4.QtGui import *
-from PyQt4.QtCore import *
-import PyQt4.QtCore as QtCore
-import PyQt4.QtGui as QtGui
+from PyQt5.QtGui import *
+from PyQt5.QtCore import *
+import PyQt5.QtGui as QtGui
+from PyQt5.QtWidgets import (QVBoxLayout, QLabel, QGridLayout, QLineEdit)
 
-from electrum.plugins import BasePlugin, hook
-from electrum.paymentrequest import PaymentRequest
-from electrum.i18n import _
-from electrum_gui.qt.util import EnterButton, Buttons, CloseButton
-from electrum_gui.qt.util import OkButton, WindowModalDialog
-
+from electroncash.plugins import BasePlugin, hook
+from electroncash.paymentrequest import PaymentRequest
+from electroncash.i18n import _
+from electroncash_gui.qt.util import EnterButton, Buttons, CloseButton
+from electroncash_gui.qt.util import OkButton, WindowModalDialog
+from electroncash.util import Weak
 
 
 class Processor(threading.Thread):
@@ -69,7 +67,10 @@ class Processor(threading.Thread):
         typ, data = self.M.search(None, 'ALL')
         for num in data[0].split():
             typ, msg_data = self.M.fetch(num, '(RFC822)')
-            msg = email.message_from_string(msg_data[0][1])
+            if type(msg_data[0][1]) is bytes:
+                msg = email.message_from_bytes(msg_data[0][1])
+            else:
+                msg = email.message_from_string(msg_data[0][1])
             p = msg.get_payload()
             if not msg.is_multipart():
                 p = [p]
@@ -96,13 +97,17 @@ class Processor(threading.Thread):
         msg['From'] = self.username
         part = MIMEBase('application', "bitcoin-paymentrequest")
         part.set_payload(payment_request)
-        Encoders.encode_base64(part)
+        encode_base64(part)
         part.add_header('Content-Disposition', 'attachment; filename="payreq.btc"')
         msg.attach(part)
         s = smtplib.SMTP_SSL(self.imap_server, timeout=2)
         s.login(self.username, self.password)
         s.sendmail(self.username, [recipient], msg.as_string())
         s.quit()
+
+
+class QEmailSignalObject(QObject):
+    email_new_invoice_signal = pyqtSignal()
 
 
 class Plugin(BasePlugin):
@@ -124,13 +129,13 @@ class Plugin(BasePlugin):
         if self.imap_server and self.username and self.password:
             self.processor = Processor(self.imap_server, self.username, self.password, self.on_receive)
             self.processor.start()
-        self.obj = QObject()
-        self.obj.connect(self.obj, SIGNAL('email:new_invoice'), self.new_invoice)
+        self.obj = QEmailSignalObject()
+        self.obj.email_new_invoice_signal.connect(self.new_invoice)
 
     def on_receive(self, pr_str):
         self.print_error('received payment request')
         self.pr = PaymentRequest(pr_str)
-        self.obj.emit(SIGNAL('email:new_invoice'))
+        self.obj.email_new_invoice_signal.emit()
 
     def new_invoice(self):
         self.parent.invoices.add(self.pr)
@@ -142,7 +147,7 @@ class Plugin(BasePlugin):
         menu.addAction(_("Send via e-mail"), lambda: self.send(window, addr))
 
     def send(self, window, addr):
-        from electrum import paymentrequest
+        from electroncash import paymentrequest
         r = window.wallet.receive_requests.get(addr)
         message = r.get('memo', '')
         if r.get('signature'):
@@ -170,10 +175,13 @@ class Plugin(BasePlugin):
         return True
 
     def settings_widget(self, window):
-        return EnterButton(_('Settings'), partial(self.settings_dialog, window))
+        windowRef = Weak.ref(window)
+        return EnterButton(_('Settings'), partial(self.settings_dialog, windowRef))
 
-    def settings_dialog(self, window):
-        d = WindowModalDialog(window, _("Email settings"))
+    def settings_dialog(self, windowRef):
+        window = windowRef()
+        if not window: return
+        d = WindowModalDialog(window.top_level_window(), _("Email settings"))
         d.setMinimumSize(500, 200)
 
         vbox = QVBoxLayout(d)

@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 
-from PyQt4.QtCore import *
-from PyQt4.QtGui import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+from PyQt5.QtWidgets import (QLineEdit, QStyle, QStyleOptionFrame)
 
-from decimal import Decimal
-from electrum.util import format_satoshis_plain
+from decimal import Decimal as PyDecimal  # Qt 5.12 also exports Decimal
+from electroncash.util import format_satoshis_plain
+
 
 class MyLineEdit(QLineEdit):
     frozen = pyqtSignal()
@@ -31,7 +33,7 @@ class AmountEdit(MyLineEdit):
         return 8
 
     def numbify(self):
-        text = unicode(self.text()).strip()
+        text = self.text().strip()
         if text == '!':
             self.shortcut.emit()
             return
@@ -53,7 +55,7 @@ class AmountEdit(MyLineEdit):
     def paintEvent(self, event):
         QLineEdit.paintEvent(self, event)
         if self.base_unit:
-            panel = QStyleOptionFrameV2()
+            panel = QStyleOptionFrame()
             self.initStyleOption(panel)
             textRect = self.style().subElementRect(QStyle.SE_LineEditContents, panel, self)
             textRect.adjust(2, 0, -10, 0)
@@ -63,7 +65,7 @@ class AmountEdit(MyLineEdit):
 
     def get_amount(self):
         try:
-            return (int if self.is_int else Decimal)(str(self.text()))
+            return (int if self.is_int else PyDecimal)(str(self.text()))
         except:
             return None
 
@@ -78,16 +80,16 @@ class BTCAmountEdit(AmountEdit):
         p = self.decimal_point()
         assert p in [2, 5, 8]
         if p == 8:
-            return 'BTC'
+            return 'BCH'
         if p == 5:
-            return 'mBTC'
+            return 'mBCH'
         if p == 2:
-            return 'bits'
+            return 'cash'
         raise Exception('Unknown base unit')
 
     def get_amount(self):
         try:
-            x = Decimal(str(self.text()))
+            x = PyDecimal(str(self.text()))
         except:
             return None
         p = pow(10, self.decimal_point())
@@ -102,3 +104,20 @@ class BTCAmountEdit(AmountEdit):
 class BTCkBEdit(BTCAmountEdit):
     def _base_unit(self):
         return BTCAmountEdit._base_unit(self) + '/kB'
+
+class BTCSatsByteEdit(BTCAmountEdit):
+    def __init__(self, parent=None):
+        BTCAmountEdit.__init__(self, decimal_point = lambda: 2, is_int = False, parent = parent)
+    def _base_unit(self):
+        return 'sats' + '/B'
+    def get_amount(self):
+        try:
+            x = float(PyDecimal(str(self.text())))
+        except:
+            return None
+        return x if x > 0.0 else None    
+    def setAmount(self, amount):
+        if amount is None:
+            self.setText(" ") # Space forces repaint in case units changed
+        else:
+            self.setText(str(round(amount*100.0)/100.0))

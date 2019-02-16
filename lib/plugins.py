@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 Thomas Voegtlin
@@ -22,129 +22,421 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
 from collections import namedtuple
+import codecs
 import traceback
-import sys
 import os
 import imp
+import json
 import pkgutil
+import sys
 import time
+import shutil
+import threading
+import zipimport
 
-from util import *
-from i18n import _
-from util import profiler, PrintError, DaemonThread, UserCancelled
+from .i18n import _
+from .util import print_error, user_dir, make_dir, versiontuple
+from .util import profiler, PrintError, DaemonThread, UserCancelled, ThreadJob
+from . import bitcoin
+from . import version
 
 plugin_loaders = {}
 hook_names = set()
 hooks = {}
 
 
+class ExternalPluginCodes:
+    SUCCESS = 0
+    MISSING_MANIFEST = 1
+    NAME_ALREADY_IN_USE = 2
+    UNABLE_TO_COPY_FILE = 3
+    INSTALLED_BUT_FAILED_LOAD = 4
+    INCOMPATIBLE_VERSION = 5
+    INCOMPATIBLE_ZIP_FORMAT = 6
+    INVALID_MANIFEST_JSON = 7
+    INVALID_MAMIFEST_DISPLAY_NAME = 8
+    INVALID_MAMIFEST_DESCRIPTION = 9
+    INVALID_MAMIFEST_VERSION = 10
+    INVALID_MAMIFEST_MINIMUM_EC_VERSION = 11
+    INVALID_MAMIFEST_PACKAGE_NAME = 12
+
+INTERNAL_USE_PREFIX = 'use_'
+EXTERNAL_USE_PREFIX = 'use_external_'
+
+
 class Plugins(DaemonThread):
 
     @profiler
-    def __init__(self, config, is_local, gui_name):
+    def __init__(self, config, gui_name):
         DaemonThread.__init__(self)
-        if is_local:
+        try:
+            internal_plugins_namespace = __import__('electroncash_plugins')
+        except ImportError:
+            # Assume we're running within the source tree.
             find = imp.find_module('plugins')
-            plugins = imp.load_module('electrum_plugins', *find)
-        else:
-            plugins = __import__('electrum_plugins')
-        self.pkgpath = os.path.dirname(plugins.__file__)
+            internal_plugins_namespace = imp.load_module('electroncash_plugins', *find)
+        self.internal_plugins_pkgpath = os.path.dirname(internal_plugins_namespace.__file__)
         self.config = config
-        self.hw_wallets = {}
-        self.plugins = {}
         self.gui_name = gui_name
-        self.descriptions = {}
+        self.hw_wallets = {}
+        self.internal_plugins = {}
+        self.internal_plugin_metadata = {}
+        self.external_plugins = {}
+        self.external_plugin_metadata = {}
         self.device_manager = DeviceMgr(config)
-        self.load_plugins()
+        self.load_internal_plugins()
+        self.load_external_plugins()
         self.add_jobs(self.device_manager.thread_jobs())
         self.start()
 
-    def load_plugins(self):
-        for loader, name, ispkg in pkgutil.iter_modules([self.pkgpath]):
+    def register_plugin(self, name, metadata, is_external=False):
+        gui_good = self.gui_name in metadata.get('available_for', [])
+        if not gui_good:
+            return False
+        details = metadata.get('registers_wallet_type')
+        if details:
+            self.register_wallet_type(name, gui_good, details, is_external)
+        details = metadata.get('registers_keystore')
+        if details:
+            self.register_keystore(name, gui_good, details, is_external)
+        return True
+
+    def load_internal_plugins(self):
+        for loader, name, ispkg in pkgutil.iter_modules([self.internal_plugins_pkgpath]):
+            # do not load deprecated plugins
+            if name in ['plot', 'exchange_rate']:
+                continue
             m = loader.find_module(name).load_module(name)
             d = m.__dict__
-            gui_good = self.gui_name in d.get('available_for', [])
-            if not gui_good:
+            if not self.register_plugin(name, d):
                 continue
-            details = d.get('registers_wallet_type')
-            if details:
-                self.register_wallet_type(name, gui_good, details)
-            details = d.get('registers_keystore')
-            if details:
-                self.register_keystore(name, gui_good, details)
-            self.descriptions[name] = d
-            if not d.get('requires_wallet_type') and self.config.get('use_' + name):
+            self.internal_plugin_metadata[name] = d
+            if not d.get('requires_wallet_type') and self.config.get(INTERNAL_USE_PREFIX + name):
                 try:
-                    self.load_plugin(name)
+                    self.load_internal_plugin(name)
                 except BaseException as e:
                     traceback.print_exc(file=sys.stdout)
                     self.print_error("cannot initialize plugin %s:" % name, str(e))
 
-    def get(self, name):
-        return self.plugins.get(name)
-
-    def count(self):
-        return len(self.plugins)
-
-    def load_plugin(self, name):
-        if name in self.plugins:
+    def load_external_plugins(self):
+        external_plugin_dir = self.get_external_plugin_dir()
+        # Unit tests, environment does not lead to finding a user dir, there will be none to load anyway.
+        if external_plugin_dir is None:
             return
-        full_name = 'electrum_plugins.' + name + '.' + self.gui_name
+
+        for file_name in os.listdir(external_plugin_dir):
+            plugin_file_path = os.path.join(external_plugin_dir, file_name)
+            leading_name, ext = os.path.splitext(file_name)
+            if ext.lower() != ".zip" or not os.path.isfile(plugin_file_path):
+                continue
+            metadata, error_code = self.get_metadata_from_external_plugin_zip_file(plugin_file_path)
+            if metadata is None:
+                continue
+            package_name = metadata['package_name']
+            if package_name in self.internal_plugin_metadata:
+                self.print_error("internal plugin also named '%s', external '%s' rejected" % (package_name, file_name))
+                continue
+            if not self.register_plugin(package_name, metadata, is_external=True):
+                continue
+            metadata["__file__"] = plugin_file_path
+            self.external_plugin_metadata[package_name] = metadata
+
+            if not metadata.get('requires_wallet_type') and self.config.get(EXTERNAL_USE_PREFIX + package_name):
+                try:
+                    self.load_external_plugin(package_name)
+                except BaseException as e:
+                    traceback.print_exc(file=sys.stdout)
+                    self.print_error("cannot initialize plugin %s:" % package_name, str(e))
+
+    def get_internal_plugin(self, name, force_load=False):
+        if force_load and name not in self.internal_plugins:
+            self.load_internal_plugin(name)
+        return self.internal_plugins.get(name)
+
+    def get_external_plugin(self, name, force_load=False):
+        if force_load and name not in self.external_plugins:
+            return self.load_external_plugin(name)
+        return self.external_plugins.get(name)
+
+    def get_internal_plugin_count(self):
+        return len(self.internal_plugins)
+
+    def get_external_plugin_count(self):
+        return len(self.external_plugins)
+
+    def load_internal_plugin(self, name):
+        if name in self.internal_plugins:
+            return self.internal_plugins[name]
+
+        full_name = 'electroncash_plugins.' + name + '.' + self.gui_name
         loader = pkgutil.find_loader(full_name)
         if not loader:
             raise RuntimeError("%s implementation for %s plugin not found"
                                % (self.gui_name, name))
         p = loader.load_module(full_name)
         plugin = p.Plugin(self, self.config, name)
+        plugin.set_enabled_prefix(INTERNAL_USE_PREFIX)
         self.add_jobs(plugin.thread_jobs())
-        self.plugins[name] = plugin
-        self.print_error("loaded", name)
+        self.internal_plugins[name] = plugin
+        self.print_error("loaded internal plugin", name)
+        return plugin
+
+    def load_external_plugin(self, name):
+        if name in self.external_plugins:
+            return self.external_plugins[name]
+        # If we do not have the metadata, it was not detected by `load_external_plugins`
+        # on startup, or added by manual user installation after that point.
+        metadata = self.external_plugin_metadata.get(name, None)
+        if metadata is None:
+            self.print_error("attempted to load unknown external plugin %s" % name)
+            return
+
+        plugin_file_path = metadata["__file__"]
+        try:
+            zipfile = zipimport.zipimporter(plugin_file_path)
+        except zipimport.ZipImportError:
+            self.print_error("unable to load zip plugin '%s'" % plugin_file_path)
+            return
+
+        try:
+            module = zipfile.load_module(name)
+        except zipimport.ZipImportError as e:
+            self.print_error("unable to load zip plugin '%s' package '%s'" % (plugin_file_path, name), str(e))
+            return
+
+        sys.modules['electroncash_external_plugins.'+ name] = module
+
+        full_name = 'electroncash_external_plugins.' + name + '.' + self.gui_name
+        loader = pkgutil.find_loader(full_name)
+        if not loader:
+            raise RuntimeError("%s implementation for %s plugin not found"
+                               % (self.gui_name, name))
+        p = loader.load_module(full_name)
+        plugin = p.Plugin(self, self.config, name)
+        plugin.set_enabled_prefix(EXTERNAL_USE_PREFIX)
+        self.add_jobs(plugin.thread_jobs())
+        self.external_plugins[name] = plugin
+        self.print_error("loaded external plugin", name)
         return plugin
 
     def close_plugin(self, plugin):
         self.remove_jobs(plugin.thread_jobs())
 
-    def enable(self, name):
-        self.config.set_key('use_' + name, True, True)
-        p = self.get(name)
-        if p:
-            return p
-        return self.load_plugin(name)
+    def enable_internal_plugin(self, name):
+        self.config.set_key(INTERNAL_USE_PREFIX + name, True, True)
+        return self.get_internal_plugin(name, force_load=True)
 
-    def disable(self, name):
-        self.config.set_key('use_' + name, False, True)
-        p = self.get(name)
+    def enable_external_plugin(self, name):
+        self.config.set_key(EXTERNAL_USE_PREFIX + name, True, True)
+        return self.get_external_plugin(name, force_load=True)
+
+    def disable_internal_plugin(self, name):
+        self.config.set_key(INTERNAL_USE_PREFIX + name, False, True)
+        p = self.get_internal_plugin(name)
         if not p:
             return
-        self.plugins.pop(name)
+        self.internal_plugins.pop(name)
         p.close()
         self.print_error("closed", name)
 
-    def toggle(self, name):
-        p = self.get(name)
-        return self.disable(name) if p else self.enable(name)
+    def disable_external_plugin(self, name):
+        self.config.set_key(EXTERNAL_USE_PREFIX + name, False, True)
+        p = self.get_external_plugin(name)
+        if not p:
+            return
+        self.external_plugins.pop(name)
+        p.close()
+        self.print_error("closed", name)
 
-    def is_available(self, name, w):
-        d = self.descriptions.get(name)
-        if not d:
+    def toggle_internal_plugin(self, name):
+        p = self.get_internal_plugin(name)
+        return self.disable_internal_plugin(name) if p else self.enable_internal_plugin(name)
+
+    def toggle_external_plugin(self, name):
+        p = self.get_external_plugin(name)
+        return self.disable_external_plugin(name) if p else self.enable_external_plugin(name)
+
+    def is_plugin_available(self, metadata, w):
+        if not metadata:
             return False
-        deps = d.get('requires', [])
+        deps = metadata.get('requires', [])
         for dep, s in deps:
             try:
                 __import__(dep)
             except ImportError:
                 return False
-        requires = d.get('requires_wallet_type', [])
+        requires = metadata.get('requires_wallet_type', [])
         return not requires or w.wallet_type in requires
+
+    def is_internal_plugin_available(self, name, w):
+        d = self.internal_plugin_metadata.get(name)
+        return self.is_plugin_available(d, w)
+
+    def is_external_plugin_available(self, name, w):
+        d = self.external_plugin_metadata.get(name)
+        return self.is_plugin_available(d, w)
+
+    def get_external_plugin_dir(self):
+        # It's possible the plugins are being stored in a local directory
+        # and the rest of the data is being stored in the non-local directory.
+        local_user_dir = user_dir(prefer_local=True)
+        # Environment does not have a user directory (will be unit tests where there are no external plugins).
+        if local_user_dir is None:
+            return None
+        make_dir(local_user_dir)
+        external_plugin_dir = os.path.join(local_user_dir, "external_plugins")
+        make_dir(external_plugin_dir)
+        return external_plugin_dir
+
+    def get_metadata_from_external_plugin_zip_file(self, plugin_file_path):
+        file_name = os.path.basename(plugin_file_path)
+        try:
+            zipfile = zipimport.zipimporter(plugin_file_path)
+        except zipimport.ZipImportError:
+            self.print_error("unable to load zip plugin for %s" % file_name)
+            return None, ExternalPluginCodes.INCOMPATIBLE_ZIP_FORMAT
+
+        try:
+            metadata_text = zipfile.get_data("manifest.json")
+        except OSError:
+            self.print_error("missing 'manifest.json' (zip plugin %s)" % file_name)
+            return None, ExternalPluginCodes.MISSING_MANIFEST
+
+        # START: json.loads for Python < 3.6 does not support bytes.  Delete this when we upgrade to 3.6.
+        if not (sys.version_info.major > 3 or sys.version_info.major == 3 and sys.version_info.minor >= 6):
+            # Copied from `json\__init__.py` in the 3.6 standard library.
+            # Python standard license applies to this if statement.
+            if isinstance(metadata_text, (bytes, bytearray)):
+                def detect_encoding(b):
+                    bstartswith = b.startswith
+                    if bstartswith((codecs.BOM_UTF32_BE, codecs.BOM_UTF32_LE)):
+                        return 'utf-32'
+                    if bstartswith((codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
+                        return 'utf-16'
+                    if bstartswith(codecs.BOM_UTF8):
+                        return 'utf-8-sig'
+
+                    if len(b) >= 4:
+                        if not b[0]:
+                            # 00 00 -- -- - utf-32-be
+                            # 00 XX -- -- - utf-16-be
+                            return 'utf-16-be' if b[1] else 'utf-32-be'
+                        if not b[1]:
+                            # XX 00 00 00 - utf-32-le
+                            # XX 00 00 XX - utf-16-le
+                            # XX 00 XX -- - utf-16-le
+                            return 'utf-16-le' if b[2] or b[3] else 'utf-32-le'
+                    elif len(b) == 2:
+                        if not b[0]:
+                            # 00 XX - utf-16-be
+                            return 'utf-16-be'
+                        if not b[1]:
+                            # XX 00 - utf-16-le
+                            return 'utf-16-le'
+                    # default
+                    return 'utf-8'
+                metadata_text = metadata_text.decode(detect_encoding(metadata_text), 'surrogatepass')
+        # END
+
+        try:
+            metadata = json.loads(metadata_text)
+        except json.JSONDecodeError:
+            self.print_error("invalid json in 'manifest.json' (zip plugin %s)" % file_name)
+            return None, ExternalPluginCodes.INVALID_MANIFEST_JSON
+
+        expected_keys = {
+            'display_name': (str, ExternalPluginCodes.INVALID_MAMIFEST_DISPLAY_NAME),
+            'description': (str, ExternalPluginCodes.INVALID_MAMIFEST_DESCRIPTION),
+            'version': (versiontuple, ExternalPluginCodes.INVALID_MAMIFEST_VERSION),
+            'minimum_ec_version': (versiontuple, ExternalPluginCodes.INVALID_MAMIFEST_MINIMUM_EC_VERSION),
+            'package_name': (str, ExternalPluginCodes.INVALID_MAMIFEST_PACKAGE_NAME),
+        }
+        for k, (expected_type, error_code) in expected_keys.items():
+            v = metadata.get(k, None)
+            if v is None:
+                self.print_error("missing metadata key %s (zip plugin %s)" % (k, file_name))
+                return None, error_code
+            if expected_type is versiontuple:
+                try:
+                    v = versiontuple(v)
+                except ValueError:
+                    self.print_error("metadata %s = %s, expected a.b.c version string (zip plugin %s)" % (k, v, file_name))
+                    return None, error_code
+            elif type(metadata[k]) is not expected_type:
+                self.print_error("metadata %s = %s, expected %s (zip plugin %s)" % (k, v, expected_type, file_name))
+                return None, error_code
+
+        return metadata, ExternalPluginCodes.SUCCESS
+
+    def install_external_plugin(self, plugin_original_path):
+        # Do the minimum verification necessary to check if the archive looks
+        # like a valid plugin zip archive.
+        metadata, error_code = self.get_metadata_from_external_plugin_zip_file(plugin_original_path)
+        if metadata is None:
+            return error_code
+
+        file_name = os.path.basename(plugin_original_path)
+        leading_name, ext = os.path.splitext(file_name)
+        package_name = metadata.get("package_name", leading_name)
+        # Ensure it is not already installed.
+        if package_name in self.external_plugins or package_name in self.external_plugin_metadata:
+            return ExternalPluginCodes.NAME_ALREADY_IN_USE
+
+        if versiontuple(metadata['minimum_ec_version']) > versiontuple(version.PACKAGE_VERSION):
+            return ExternalPluginCodes.INCOMPATIBLE_VERSION
+
+        # Copy the original file to the external plugin hosting dir.
+        install_dir = self.get_external_plugin_dir()
+        plugin_file_path = os.path.join(install_dir, file_name)
+        try:
+            shutil.copyfile(plugin_original_path, plugin_file_path)
+        except OSError:
+            return ExternalPluginCodes.UNABLE_TO_COPY_FILE
+        metadata["__file__"] = plugin_file_path
+
+        # Register the existence of the newly placed plugin archive.
+        # This would otherwise be recorded in `load_external_plugins`.
+        self.external_plugin_metadata[package_name] = metadata
+
+        # Not documented wallet type constraint.  Follow pattern elsewhere.
+        if metadata.get('requires_wallet_type'):
+            return ExternalPluginCodes.SUCCESS
+
+        # Otherwise, we enable all other installed plugins.  This causes the
+        # plugin to be loaded, afterward.
+        try:
+            self.enable_external_plugin(package_name)
+        except BaseException as e:
+            traceback.print_exc(file=sys.stdout)
+            self.print_error("cannot enable/load external plugin %s:" % package_name, str(e))
+            return ExternalPluginCodes.INSTALLED_BUT_FAILED_LOAD
+
+        return ExternalPluginCodes.SUCCESS
+
+    def uninstall_external_plugin(self, name):
+        self.disable_external_plugin(name)
+        if 'electroncash_external_plugins.'+ name in sys.modules:
+            del sys.modules['electroncash_external_plugins.'+ name]
+
+        metadata = self.external_plugin_metadata[name]
+        plugin_file_path = metadata["__file__"]
+        del self.external_plugin_metadata[name]
+
+        os.remove(plugin_file_path)
+
+    def find_plugin(self, name, force_load=False):
+        if name in self.internal_plugin_metadata:
+            return self.get_internal_plugin(name, force_load)
+        else:
+            return self.get_external_plugin(name, force_load)
 
     def get_hardware_support(self):
         out = []
         for name, (gui_good, details) in self.hw_wallets.items():
             if gui_good:
                 try:
-                    p = self.get_plugin(name)
+                    p = self.find_plugin(name, force_load=True)
                     if p.is_enabled():
                         out.append([name, details[2], p])
                 except:
@@ -152,28 +444,30 @@ class Plugins(DaemonThread):
                     self.print_error("cannot load plugin for:", name)
         return out
 
-    def register_wallet_type(self, name, gui_good, wallet_type):
-        from wallet import register_wallet_type, register_constructor
+    def register_wallet_type(self, name, gui_good, wallet_type, is_external):
+        from .wallet import register_wallet_type, register_constructor
         self.print_error("registering wallet type", (wallet_type, name))
         def loader():
-            plugin = self.get_plugin(name)
+            if is_external:
+                plugin = self.get_external_plugin(name, force_load=True)
+            else:
+                plugin = self.get_internal_plugin(name, force_load=True)
             register_constructor(wallet_type, plugin.wallet_class)
         register_wallet_type(wallet_type)
         plugin_loaders[wallet_type] = loader
 
-    def register_keystore(self, name, gui_good, details):
-        from keystore import register_keystore
+    def register_keystore(self, name, gui_good, details, is_external):
+        from .keystore import register_keystore
         def dynamic_constructor(d):
-            return self.get_plugin(name).keystore_class(d)
+            if is_external:
+                plugin = self.get_external_plugin(name, force_load=True)
+            else:
+                plugin = self.get_internal_plugin(name, force_load=True)
+            return plugin.keystore_class(d)
         if details[0] == 'hardware':
             self.hw_wallets[name] = (gui_good, details)
             self.print_error("registering hardware %s: %s" %(name, details))
             register_keystore(details[1], dynamic_constructor)
-
-    def get_plugin(self, name):
-        if not name in self.plugins:
-            self.load_plugin(name)
-        return self.plugins[name]
 
     def run(self):
         while self.is_running():
@@ -183,7 +477,7 @@ class Plugins(DaemonThread):
 
 
 def hook(func):
-    hook_names.add(func.func_name)
+    hook_names.add(func.__name__)
     return func
 
 def run_hook(name, *args):
@@ -206,7 +500,6 @@ def run_hook(name, *args):
 
 
 class BasePlugin(PrintError):
-
     def __init__(self, parent, config, name):
         self.parent = parent  # The plugins object
         self.name = name
@@ -218,6 +511,10 @@ class BasePlugin(PrintError):
                 l = hooks.get(k, [])
                 l.append((self, getattr(self, k)))
                 hooks[k] = l
+
+    def set_enabled_prefix(self, prefix):
+        # This is set via a method in order not to break the existing API.
+        self.enabled_use_prefix = prefix
 
     def diagnostic_name(self):
         return self.name
@@ -238,20 +535,28 @@ class BasePlugin(PrintError):
     def on_close(self):
         pass
 
-    def requires_settings(self):
-        return False
-
     def thread_jobs(self):
         return []
 
     def is_enabled(self):
-        return self.is_available() and self.config.get('use_'+self.name) is True
+        return self.is_available() and self.config.get(self.enabled_use_prefix + self.name) is True
 
     def is_available(self):
         return True
 
-    def settings_dialog(self):
+    def can_user_disable(self):
+        return True
+
+    # Internal plugin settings support. `settings_widget(dialog)` is called on the plugin.
+    def requires_settings(self):
+        return False
+
+    def settings_dialog(self, parent):
         pass
+
+    # External plugin settings support. `settings_dialog(parent_dialog)` is called on the plugin.
+    def has_settings_dialog(self):
+        return False
 
 
 class DeviceNotFoundError(Exception):
@@ -260,7 +565,7 @@ class DeviceNotFoundError(Exception):
 class DeviceUnpairableError(Exception):
     pass
 
-Device = namedtuple("Device", "path interface_number id_ product_key")
+Device = namedtuple("Device", "path interface_number id_ product_key usage_page")
 DeviceInfo = namedtuple("DeviceInfo", "device label initialized")
 
 class DeviceMgr(ThreadJob, PrintError):
@@ -296,7 +601,7 @@ class DeviceMgr(ThreadJob, PrintError):
 
     def __init__(self, config):
         super(DeviceMgr, self).__init__()
-        # Keyed by xpub.  The value is the device id 
+        # Keyed by xpub.  The value is the device id
         # has been paired, and None otherwise.
         self.xpub_ids = {}
         # A list of clients.  The key is the client, the value is
@@ -305,6 +610,8 @@ class DeviceMgr(ThreadJob, PrintError):
         # What we recognise.  Each entry is a (vendor_id, product_id)
         # pair.
         self.recognised_hardware = set()
+        # Custom enumerate functions for devices we don't know about.
+        self.enumerate_func = set()
         # For synchronization
         self.lock = threading.RLock()
         self.hid_lock = threading.RLock()
@@ -326,6 +633,9 @@ class DeviceMgr(ThreadJob, PrintError):
     def register_devices(self, device_pairs):
         for pair in device_pairs:
             self.recognised_hardware.add(pair)
+
+    def register_enumerate_func(self, func):
+        self.enumerate_func.add(func)
 
     def create_client(self, device, handler, plugin):
         # Get from cache first
@@ -355,15 +665,20 @@ class DeviceMgr(ThreadJob, PrintError):
             if not xpub in self.xpub_ids:
                 return
             _id = self.xpub_ids.pop(xpub)
-        client = self.client_lookup(_id)
-        self.clients.pop(client, None)
-        if client:
-            client.close()
+            self._close_client(_id)
 
     def unpair_id(self, id_):
         xpub = self.xpub_by_id(id_)
         if xpub:
             self.unpair_xpub(xpub)
+        else:
+            self._close_client(id_)
+
+    def _close_client(self, id_):
+        client = self.client_lookup(id_)
+        self.clients.pop(client, None)
+        if client:
+            client.close()
 
     def pair_xpub(self, xpub, id_):
         with self.lock:
@@ -385,6 +700,8 @@ class DeviceMgr(ThreadJob, PrintError):
 
     def client_for_keystore(self, plugin, handler, keystore, force_pair):
         self.print_error("getting client for keystore")
+        if handler is None:
+            raise BaseException(_("Handler not found for") + ' ' + plugin.name + '\n' + _("A library is probably missing."))
         handler.update_status(False)
         devices = self.scan_devices()
         xpub = keystore.xpub
@@ -415,14 +732,14 @@ class DeviceMgr(ThreadJob, PrintError):
     def force_pair_xpub(self, plugin, handler, info, xpub, derivation, devices):
         # The wallet has not been previously paired, so let the user
         # choose an unpaired device and compare its first address.
-
+        xtype = bitcoin.xpub_type(xpub)
         client = self.client_lookup(info.device.id_)
         if client and client.is_pairable():
             # See comment above for same code
             client.handler = handler
             # This will trigger a PIN/passphrase entry request
             try:
-                client_xpub = client.get_xpub(derivation)
+                client_xpub = client.get_xpub(derivation, xtype)
             except (UserCancelled, RuntimeError):
                  # Bad / cancelled PIN / passphrase
                 client_xpub = None
@@ -433,11 +750,11 @@ class DeviceMgr(ThreadJob, PrintError):
         # The user input has wrong PIN or passphrase, or cancelled input,
         # or it is not pairable
         raise DeviceUnpairableError(
-            _('Electrum cannot pair with your %s.\n\n'
+            _('Electron Cash cannot pair with your {}.\n\n'
               'Before you request bitcoins to be sent to addresses in this '
               'wallet, ensure you can pair with your device, or that you have '
               'its seed (and passphrase, if any).  Otherwise all bitcoins you '
-              'receive will be unspendable.') % plugin.device)
+              'receive will be unspendable.').format(plugin.device))
 
     def unpaired_device_infos(self, handler, plugin, devices=None):
         '''Returns a list of DeviceInfo objects: one for each connected,
@@ -463,9 +780,9 @@ class DeviceMgr(ThreadJob, PrintError):
             infos = self.unpaired_device_infos(handler, plugin, devices)
             if infos:
                 break
-            msg = _('Could not connect to your %s.  Verify the cable is '
+            msg = _('Please insert your {}.  Verify the cable is '
                     'connected and that no other application is using it.\n\n'
-                    'Try to connect again?') % plugin.device
+                    'Try to connect again?').format(plugin.device)
             if not handler.yes_no_question(msg):
                 raise UserCancelled()
             devices = None
@@ -475,7 +792,7 @@ class DeviceMgr(ThreadJob, PrintError):
         for info in infos:
             if info.label == keystore.label:
                 return info
-        msg = _("Please select which %s device to use:") % plugin.device
+        msg = _("Please select which {} device to use:").format(plugin.device)
         descriptions = [info.label + ' (%s)'%(_("initialized") if info.initialized else _("wiped")) for info in infos]
         c = handler.query_choice(msg, descriptions)
         if c is None:
@@ -486,13 +803,12 @@ class DeviceMgr(ThreadJob, PrintError):
         handler.win.wallet.save_keystore()
         return info
 
-    def scan_devices(self):
-        # All currently supported hardware libraries use hid, so we
-        # assume it here.  This can be easily abstracted if necessary.
-        # Note this import must be local so those without hardware
-        # wallet libraries are not affected.
-        import hid
-        self.print_error("scanning devices...")
+    def _scan_devices_with_hid(self):
+        try:
+            import hid
+        except ImportError:
+            return []
+
         with self.hid_lock:
             hid_list = hid.enumerate(0, 0)
         # First see what's connected that we know about
@@ -501,20 +817,39 @@ class DeviceMgr(ThreadJob, PrintError):
             product_key = (d['vendor_id'], d['product_id'])
             if product_key in self.recognised_hardware:
                 # Older versions of hid don't provide interface_number
-                interface_number = d.get('interface_number', 0)
-                serial = d['serial_number']
-                if len(serial) == 0:
-                    serial = d['path']
+                interface_number = d.get('interface_number', -1)
+                usage_page = d['usage_page']
+                id_ = d['serial_number']
+                if len(id_) == 0:
+                    id_ = str(d['path'])
+                id_ += str(interface_number) + str(usage_page)
                 devices.append(Device(d['path'], interface_number,
-                                      serial, product_key))
+                                      id_, product_key, usage_page))
+        return devices
 
-        # Now find out what was disconnected
+    def scan_devices(self):
+        self.print_error("scanning devices...")
+
+        # First see what's connected that we know about
+        devices = self._scan_devices_with_hid()
+
+        # Let plugin handlers enumerate devices we don't know about
+        for f in self.enumerate_func:
+            try:
+                new_devices = f()
+            except BaseException as e:
+                self.print_error('custom device enum failed. func {}, error {}'
+                                 .format(str(f), str(e)))
+            else:
+                devices.extend(new_devices)
+
+        # find out what was disconnected
         pairs = [(dev.path, dev.id_) for dev in devices]
         disconnected_ids = []
         with self.lock:
             connected = {}
             for client, pair in self.clients.items():
-                if pair in pairs:
+                if pair in pairs and client.has_usable_connection_with_device():
                     connected[client] = pair
                 else:
                     disconnected_ids.append(pair[1])

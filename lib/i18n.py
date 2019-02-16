@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2012 thomasv@gitorious
@@ -22,20 +22,18 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
 import gettext, os
 
 LOCALE_DIR = os.path.join(os.path.dirname(__file__), 'locale')
-language = gettext.translation('electrum', LOCALE_DIR, fallback = True)
-
+language = gettext.translation('electron-cash', LOCALE_DIR, fallback = True)
 
 def _(x):
     global language
-    return language.ugettext(x)
+    return language.gettext(x)
 
 def set_language(x):
     global language
-    if x: language = gettext.translation('electrum', LOCALE_DIR, fallback = True, languages=[x])
+    if x: language = gettext.translation('electron-cash', LOCALE_DIR, fallback = True, languages=[x])
 
 
 languages = {
@@ -47,6 +45,7 @@ languages = {
     'eo_UY':_('Esperanto'),
     'el_GR':_('Greek'),
     'en_UK':_('English'),
+    'es_AR':_('Spanish (S. America)'),
     'es_ES':_('Spanish'),
     'fr_FR':_('French'),
     'hu_HU':_('Hungarian'),

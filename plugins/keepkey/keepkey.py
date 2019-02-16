@@ -1,20 +1,20 @@
-from ..trezor.plugin import TrezorCompatiblePlugin, TrezorCompatibleKeyStore
+from .plugin import KeepKeyCompatiblePlugin, KeepKeyCompatibleKeyStore
 
 
-class KeepKey_KeyStore(TrezorCompatibleKeyStore):
+class KeepKey_KeyStore(KeepKeyCompatibleKeyStore):
     hw_type = 'keepkey'
     device = 'KeepKey'
 
 
-class KeepKeyPlugin(TrezorCompatiblePlugin):
+class KeepKeyPlugin(KeepKeyCompatiblePlugin):
     firmware_URL = 'https://www.keepkey.com'
     libraries_URL = 'https://github.com/keepkey/python-keepkey'
-    minimum_firmware = (1, 0, 0)
+    minimum_firmware = (4, 0, 0)
     keystore_class = KeepKey_KeyStore
 
     def __init__(self, *args):
         try:
-            import client
+            from . import client
             import keepkeylib
             import keepkeylib.ckd_public
             import keepkeylib.transport_hid
@@ -25,7 +25,7 @@ class KeepKeyPlugin(TrezorCompatiblePlugin):
             self.libraries_available = True
         except ImportError:
             self.libraries_available = False
-        TrezorCompatiblePlugin.__init__(self, *args)
+        KeepKeyCompatiblePlugin.__init__(self, *args)
 
     def hid_transport(self, pair):
         from keepkeylib.transport_hid import HidTransport
@@ -33,3 +33,7 @@ class KeepKeyPlugin(TrezorCompatiblePlugin):
 
     def bridge_transport(self, d):
         raise NotImplementedError('')
+
+    def get_coin_name(self):
+        # No testnet support yet
+        return "BitcoinCash"

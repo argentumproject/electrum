@@ -20,33 +20,70 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
-import sys
 import re
 import dns
+from dns.exception import DNSException
+import json
+import traceback
+import sys
 
-import bitcoin
-import dnssec
-from util import StoreDict, print_error
-from i18n import _
+from .address import Address
+from . import dnssec
+from .util import print_error
 
 
-class Contacts(StoreDict):
+class Contacts(dict):
 
-    def __init__(self, config):
-        StoreDict.__init__(self, config, 'contacts')
+    def __init__(self, storage):
+        self.storage = storage
+        d = self.storage.get('contacts', {})
+        try:
+            self.update(d)
+        except:
+            return
         # backward compatibility
         for k, v in self.items():
             _type, n = v
-            if _type == 'address' and bitcoin.is_address(n):
+            if _type == 'address' and Address.is_valid(n):
                 self.pop(k)
                 self[n] = ('address', k)
 
+    def save(self):
+        self.storage.put('contacts', dict(self))
+
+    def import_file(self, path):
+        count = 0
+        try:
+            with open(path, 'r') as f:
+                d = self._validate(json.loads(f.read()))
+                count = len(d)
+        except:
+            traceback.print_exc(file=sys.stderr)
+            raise
+        self.update(d)
+        self.save()
+        return count
+
+    def export_file(self, path):
+        ''' Save contacts as JSON to a file. May raise OSError. '''
+        with open(path, 'w+') as f:
+            json.dump(self, f, indent=4, sort_keys=True)
+        return len(self)
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, key, value)
+        self.save()
+
+    # This breaks expected dictionary pop behaviour.  In the normal case, it'd return the popped value, or throw a KeyError.
+    def pop(self, key):
+        if key in self.keys():
+            dict.pop(self, key)
+            self.save()
 
     def resolve(self, k):
-        if bitcoin.is_address(k):
+        if Address.is_valid(k):
             return {
-                'address': k,
+                'address': Address.from_string(k),
                 'type': 'address'
             }
         if k in self.keys():
@@ -70,7 +107,11 @@ class Contacts(StoreDict):
     def resolve_openalias(self, url):
         # support email-style addresses, per the OA standard
         url = url.replace('@', '.')
-        records, validated = dnssec.query(url, dns.rdatatype.TXT)
+        try:
+            records, validated = dnssec.query(url, dns.rdatatype.TXT)
+        except DNSException as e:
+            print_error('Error resolving openalias: ', str(e))
+            return None
         prefix = 'btc'
         for record in records:
             string = record.strings[0]
@@ -81,7 +122,7 @@ class Contacts(StoreDict):
                     name = address
                 if not address:
                     continue
-                return address, name, validated
+                return Address.from_string(address), name, validated
 
     def find_regex(self, haystack, needle):
         regex = re.compile(needle)
@@ -90,3 +131,14 @@ class Contacts(StoreDict):
         except AttributeError:
             return None
 
+    def _validate(self, data):
+        for k,v in list(data.items()):
+            if k == 'contacts':
+                return self._validate(v)
+            if not Address.is_valid(k):
+                data.pop(k)
+            else:
+                _type,_ = v
+                if _type != 'address':
+                    data.pop(k)
+        return data

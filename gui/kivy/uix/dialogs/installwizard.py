@@ -14,22 +14,21 @@ from kivy.core.window import Window
 from kivy.clock import Clock
 from kivy.utils import platform
 
-from electrum_gui.kivy.uix.dialogs import EventsDialog
-from electrum_gui.kivy.i18n import _
-from electrum.base_wizard import BaseWizard
+from electroncash.base_wizard import BaseWizard
 
-from password_dialog import PasswordDialog
+
+from . import EventsDialog
+from ...i18n import _
+from .password_dialog import PasswordDialog
 
 # global Variables
-app = App.get_running_app()
-
 is_test = (platform == "linux")
 test_seed = "time taxi field recycle tiny license olive virus report rare steel portion achieve"
 test_xpub = "xpub661MyMwAqRbcEbvVtRRSjqxVnaWVUMewVzMiURAKyYratih4TtBpMypzzefmv8zUNebmNVzB3PojdC5sV2P9bDgMoo9B3SARw1MXUUfU1GL"
 
 Builder.load_string('''
 #:import Window kivy.core.window.Window
-#:import _ electrum_gui.kivy.i18n._
+#:import _ electroncash_gui.kivy.i18n._
 
 
 <WizardTextInput@TextInput>
@@ -89,10 +88,10 @@ Builder.load_string('''
             height: self.minimum_height
             Label:
                 color: root.text_color
-                text: 'ELECTRUM'
+                text: 'ELECTRON CASH'
                 size_hint: 1, None
                 height: self.texture_size[1] if self.opacity else 0
-                font_size: '33sp'
+                font_size: '31sp'
                 font_name: 'gui/kivy/data/fonts/tron/Tr2n.ttf'
         GridLayout:
             cols: 1
@@ -136,7 +135,7 @@ Builder.load_string('''
         height: self.minimum_height
         Label:
             color: root.text_color
-            text: _('From %d cosigners')%n.value
+            text: _('From {} cosigners').format(n.value)
         Slider:
             id: n
             range: 2, 5
@@ -144,7 +143,7 @@ Builder.load_string('''
             value: 2
         Label:
             color: root.text_color
-            text: _('Require %d signatures')%m.value
+            text: _('Require {} signatures').format(m.value)
         Slider:
             id: m
             range: 1, n.value
@@ -227,6 +226,7 @@ Builder.load_string('''
             id: text_input_seed
             text: ''
             on_text: Clock.schedule_once(root.on_text)
+            on_release: root.options_dialog()
         SeedLabel:
             text: root.message
         BoxLayout:
@@ -397,10 +397,12 @@ Builder.load_string('''
         height: self.minimum_height
         orientation: 'vertical'
         spacing: '12dp'
-        SeedLabel:
-            text: root.message
         SeedButton:
             text: root.seed_text
+            on_release: root.options_dialog()
+        SeedLabel:
+            text: root.message
+
 
 <LineDialog>
 
@@ -408,17 +410,13 @@ Builder.load_string('''
         text: root.title
     SeedLabel:
         text: root.message
-    GridLayout:
-        cols: 2
+    TextInput:
+        id: passphrase_input
+        multiline: False
         size_hint: 1, None
         height: '27dp'
-        BigLabel:
-            text: ''
-        TextInput:
-            id: passphrase_input
-            multiline: False
-            size_hint: 1, None
-            height: '27dp'
+    SeedLabel:
+        text: root.warning
 
 ''')
 
@@ -430,7 +428,7 @@ class WizardDialog(EventsDialog):
     crcontent = ObjectProperty(None)
 
     def __init__(self, wizard, **kwargs):
-        super(WizardDialog, self).__init__(**kwargs)
+        super(WizardDialog, self).__init__()
         self.wizard = wizard
         self.ids.back.disabled = not wizard.can_go_back()
         self.app = App.get_running_app()
@@ -515,6 +513,7 @@ class WizardChoiceDialog(WizardDialog):
 class LineDialog(WizardDialog):
     title = StringProperty('')
     message = StringProperty('')
+    warning = StringProperty('')
 
     def __init__(self, wizard, **kwargs):
         WizardDialog.__init__(self, wizard, **kwargs)
@@ -526,14 +525,26 @@ class LineDialog(WizardDialog):
 class ShowSeedDialog(WizardDialog):
     seed_text = StringProperty('')
     message = _("If you forget your PIN or lose your device, your seed phrase will be the only way to recover your funds.")
+    ext = False
+
+    def __init__(self, wizard, **kwargs):
+        super(ShowSeedDialog, self).__init__(wizard, **kwargs)
+        self.seed_text = kwargs['seed_text']
 
     def on_parent(self, instance, value):
         if value:
             app = App.get_running_app()
             self._back = _back = partial(self.ids.back.dispatch, 'on_release')
 
+    def options_dialog(self):
+        from .seed_options import SeedOptionsDialog
+        def callback(status):
+            self.ext = status
+        d = SeedOptionsDialog(self.ext, callback)
+        d.open()
+
     def get_params(self, b):
-        return (self.seed_text,)
+        return (self.ext,)
 
 
 class WordButton(Button):
@@ -548,12 +559,20 @@ class RestoreSeedDialog(WizardDialog):
     def __init__(self, wizard, **kwargs):
         super(RestoreSeedDialog, self).__init__(wizard, **kwargs)
         self._test = kwargs['test']
-        from electrum.mnemonic import Mnemonic
-        from electrum.old_mnemonic import words as old_wordlist
+        from electroncash.mnemonic import Mnemonic
+        from electroncash.old_mnemonic import words as old_wordlist
         self.words = set(Mnemonic('en').wordlist).union(set(old_wordlist))
         self.ids.text_input_seed.text = test_seed if is_test else ''
         self.message = _('Please type your seed phrase using the virtual keyboard.')
         self.title = _('Enter Seed')
+        self.ext = False
+
+    def options_dialog(self):
+        from .seed_options import SeedOptionsDialog
+        def callback(status):
+            self.ext = status
+        d = SeedOptionsDialog(self.ext, callback)
+        d.open()
 
     def get_suggestions(self, prefix):
         for w in self.words:
@@ -574,13 +593,16 @@ class RestoreSeedDialog(WizardDialog):
         enable_space = False
         self.ids.suggestions.clear_widgets()
         suggestions = [x for x in self.get_suggestions(last_word)]
+
+        if last_word in suggestions:
+            b = WordButton(text=last_word)
+            self.ids.suggestions.add_widget(b)
+            enable_space = True
+
         for w in suggestions:
-            if w == last_word:
-                enable_space = True
-            else:
-                if len(suggestions) < 10:
-                    b = WordButton(text=w)
-                    self.ids.suggestions.add_widget(b)
+            if w != last_word and len(suggestions) < 10:
+                b = WordButton(text=w)
+                self.ids.suggestions.add_widget(b)
 
         i = len(last_word)
         p = set()
@@ -605,9 +627,7 @@ class RestoreSeedDialog(WizardDialog):
 
     def get_text(self):
         ti = self.ids.text_input_seed
-        text = unicode(ti.text).strip()
-        text = ' '.join(text.split())
-        return text
+        return ' '.join(ti.text.strip().split())
 
     def update_text(self, c):
         c = c.lower()
@@ -646,12 +666,14 @@ class RestoreSeedDialog(WizardDialog):
             tis.focus = False
 
     def get_params(self, b):
-        return (self.get_text(), False)
+        return (self.get_text(), False, self.ext)
 
 
 class ConfirmSeedDialog(RestoreSeedDialog):
     def get_params(self, b):
         return (self.get_text(),)
+    def options_dialog(self):
+        pass
 
 
 class ShowXpubDialog(WizardDialog):
@@ -668,7 +690,7 @@ class ShowXpubDialog(WizardDialog):
         self.app.do_share(self.xpub, _("Master Public Key"))
 
     def do_qr(self):
-        from qr_dialog import QRDialog
+        from .qr_dialog import QRDialog
         popup = QRDialog(_("Master Public Key"), self.xpub, True)
         popup.open()
 
@@ -680,24 +702,28 @@ class AddXpubDialog(WizardDialog):
         self.is_valid = kwargs['is_valid']
         self.title = kwargs['title']
         self.message = kwargs['message']
+        self.allow_multi = kwargs.get('allow_multi', False)
 
     def check_text(self, dt):
         self.ids.next.disabled = not bool(self.is_valid(self.get_text()))
 
     def get_text(self):
         ti = self.ids.text_input
-        return unicode(ti.text).strip()
+        return ti.text.strip()
 
     def get_params(self, button):
         return (self.get_text(),)
 
     def scan_xpub(self):
         def on_complete(text):
-            self.ids.text_input.text = text
+            if self.allow_multi:
+                self.ids.text_input.text += text + '\n'
+            else:
+                self.ids.text_input.text = text
         self.app.scan_qr(on_complete)
 
     def do_paste(self):
-        self.ids.text_input.text = test_xpub if is_test else unicode(self.app._clipboard.paste())
+        self.ids.text_input.text = test_xpub if is_test else self.app._clipboard.paste()
 
     def do_clear(self):
         self.ids.text_input.text = ''
@@ -727,10 +753,11 @@ class InstallWizard(BaseWizard, Widget):
             try:
                 task()
             except Exception as err:
-                Clock.schedule_once(lambda dt: app.show_error(str(err)))
+                self.show_error(str(err))
             # on  completion hide message
             Clock.schedule_once(lambda dt: app.info_bubble.hide(now=True), -1)
 
+        app = App.get_running_app()
         app.show_info_bubble(
             text=msg, icon='atlas://gui/kivy/theming/light/important',
             pos=Window.center, width='200sp', arrow_pos=None, modal=True)
@@ -738,10 +765,16 @@ class InstallWizard(BaseWizard, Widget):
         t.start()
 
     def terminate(self, **kwargs):
-        self.wallet.start_threads(self.network)
         self.dispatch('on_wizard_complete', self.wallet)
 
-    def choice_dialog(self, **kwargs): WizardChoiceDialog(self, **kwargs).open()
+    def choice_dialog(self, **kwargs):
+        choices = kwargs['choices']
+        if len(choices) > 1:
+            WizardChoiceDialog(self, **kwargs).open()
+        else:
+            f = kwargs['run_next']
+            f(choices[0][0])
+
     def multisig_dialog(self, **kwargs): WizardMultisigDialog(self, **kwargs).open()
     def show_seed_dialog(self, **kwargs): ShowSeedDialog(self, **kwargs).open()
     def line_dialog(self, **kwargs): LineDialog(self, **kwargs).open()
@@ -754,7 +787,7 @@ class InstallWizard(BaseWizard, Widget):
     def restore_seed_dialog(self, **kwargs):
         RestoreSeedDialog(self, **kwargs).open()
 
-    def restore_keys_dialog(self, **kwargs):
+    def add_xpub_dialog(self, **kwargs):
         kwargs['message'] += ' ' + _('Use the camera button to scan a QR code.')
         AddXpubDialog(self, **kwargs).open()
 
@@ -766,7 +799,8 @@ class InstallWizard(BaseWizard, Widget):
     def show_xpub_dialog(self, **kwargs): ShowXpubDialog(self, **kwargs).open()
 
     def show_error(self, msg):
-        app.show_error(msg, duration=0.5)
+        app = App.get_running_app()
+        Clock.schedule_once(lambda dt: app.show_error(msg))
 
     def password_dialog(self, message, callback):
         popup = PasswordDialog()
@@ -778,13 +812,13 @@ class InstallWizard(BaseWizard, Widget):
             if pin:
                 self.run('confirm_password', pin, run_next)
             else:
-                run_next(None)
+                run_next(None, None)
         self.password_dialog('Choose a PIN code', callback)
 
     def confirm_password(self, pin, run_next):
         def callback(conf):
             if conf == pin:
-                run_next(pin)
+                run_next(pin, False)
             else:
                 self.show_error(_('PIN mismatch'))
                 self.run('request_password', run_next)

@@ -2,7 +2,7 @@ from kivy.app import App
 from kivy.factory import Factory
 from kivy.lang import Builder
 
-Factory.register('QRScanner', module='electrum_gui.kivy.qr_scanner')
+Factory.register('QRScanner', module='electroncash_gui.kivy.qr_scanner')
 
 class QrScannerDialog(Factory.AnimatedPopup):
 
@@ -17,7 +17,7 @@ class QrScannerDialog(Factory.AnimatedPopup):
     def on_complete(self, x):
         ''' Default Handler for on_complete event.
         '''
-        print x
+        print(x)
 
 
 Builder.load_string('''

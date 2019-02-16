@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 Thomas Voegtlin
@@ -22,19 +22,22 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+import webbrowser
 
-
-from electrum.i18n import _
-from electrum.bitcoin import is_address
-from electrum.util import block_explorer_URL, format_satoshis, format_time, age
-from electrum.plugins import run_hook
-from electrum.paymentrequest import PR_UNPAID, PR_PAID, PR_UNKNOWN, PR_EXPIRED
-from PyQt4.QtGui import *
-from PyQt4.QtCore import *
-from util import MyTreeWidget, pr_tooltips, pr_icons
+from electroncash.i18n import _
+import electroncash.web as web
+from electroncash.address import Address
+from electroncash.plugins import run_hook
+from electroncash.util import FileImportFailed
+from PyQt5.QtGui import *
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import (
+    QAbstractItemView, QFileDialog, QMenu, QTreeWidgetItem)
+from .util import MyTreeWidget
 
 
 class ContactList(MyTreeWidget):
+    filter_columns = [0, 1]  # Key, Value
 
     def __init__(self, parent):
         MyTreeWidget.__init__(self, parent, self.create_menu, [_('Name'), _('Address')], 0, [0])
@@ -45,39 +48,64 @@ class ContactList(MyTreeWidget):
         # openalias items shouldn't be editable
         return item.text(1) != "openalias"
 
-    def on_edited(self, item, column, prior):
-        if column == 0:  # Remove old contact if renamed
-            self.parent.contacts.pop(prior)
-        self.parent.set_contact(unicode(item.text(0)), unicode(item.text(1)))
+    def on_edited(self, item, column, prior_value):
+        self.parent.set_contact(item.text(0), item.text(1))
+
+    def import_contacts(self):
+        wallet_folder = self.parent.get_wallet_folder()
+        filename, __ = QFileDialog.getOpenFileName(self.parent, "Select your wallet file", wallet_folder)
+        if not filename:
+            return
+        try:
+            num = self.parent.contacts.import_file(filename)
+            self.parent.show_message(_("{} contacts successfully imported.").format(num))
+        except BaseException as e:
+            self.parent.show_error(_("Electron Cash was unable to import your contacts.") + "\n" + repr(e))
+        self.on_update()
+
+    def export_contacts(self):
+        if not len(self.parent.contacts):
+            self.parent.show_error(_("Your contact list is empty."))
+            return
+        try:
+            fileName = self.parent.getSaveFileName(_("Select file to save your contacts"), 'electron-cash_contacts.json', "*.json")
+            if fileName:
+                num = self.parent.contacts.export_file(fileName)
+                self.parent.show_message(_("{} contacts exported to '{}'").format(num, fileName))
+        except BaseException as e:
+            self.parent.show_error(_("Electron Cash was unable to export your contacts.") + "\n" + repr(e))
 
     def create_menu(self, position):
         menu = QMenu()
         selected = self.selectedItems()
         if not selected:
             menu.addAction(_("New contact"), lambda: self.parent.new_contact_dialog())
+            menu.addAction(_("Import file"), lambda: self.import_contacts())
+            if len(self.parent.contacts):
+                menu.addAction(_("Export file"), lambda: self.export_contacts())
         else:
-            names = [unicode(item.text(0)) for item in selected]
-            keys = [unicode(item.text(1)) for item in selected]
+            names = [item.text(0) for item in selected]
+            keys = [item.text(1) for item in selected]
             column = self.currentColumn()
             column_title = self.headerItem().text(column)
-            column_data = '\n'.join([unicode(item.text(column)) for item in selected])
-
-            menu.addAction(_("Copy %s")%column_title, lambda: self.parent.app.clipboard().setText(column_data))
+            column_data = '\n'.join([item.text(column) for item in selected])
+            menu.addAction(_("Copy {}").format(column_title), lambda: self.parent.app.clipboard().setText(column_data))
             if column in self.editable_columns:
-                menu.addAction(_("Edit %s")%column_title, lambda: self.editItem(item, column))
-
+                item = self.currentItem()
+                menu.addAction(_("Edit {}").format(column_title), lambda: self.editItem(item, column))
             menu.addAction(_("Pay to"), lambda: self.parent.payto_contacts(keys))
             menu.addAction(_("Delete"), lambda: self.parent.delete_contacts(keys))
-            URLs = [block_explorer_URL(self.config, 'addr', key) for key in filter(is_address, keys)]
-            if URLs:
-                menu.addAction(_("View on block explorer"), lambda: map(webbrowser.open, URLs))
+            URLs = [web.BE_URL(self.config, 'addr', Address.from_string(key))
+                    for key in keys if Address.is_valid(key)]
+            if any(URLs):
+                menu.addAction(_("View on block explorer"), lambda: [URL and webbrowser.open(URL) for URL in URLs])
 
         run_hook('create_contact_menu', menu, selected)
         menu.exec_(self.viewport().mapToGlobal(position))
 
     def on_update(self):
         item = self.currentItem()
-        current_key = item.data(0, Qt.UserRole).toString() if item else None
+        current_key = item.data(0, Qt.UserRole) if item else None
         self.clear()
         for key in sorted(self.parent.contacts.keys()):
             _type, name = self.parent.contacts[key]

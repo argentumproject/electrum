@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2012 thomasv@gitorious
@@ -25,19 +25,20 @@
 
 import copy
 import datetime
+from functools import partial
 import json
 
-import PyQt4
-from PyQt4.QtGui import *
-from PyQt4.QtCore import *
-import PyQt4.QtCore as QtCore
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+from PyQt5.QtWidgets import *
 
-from electrum import transaction
-from electrum.bitcoin import base_encode
-from electrum.i18n import _
-from electrum.plugins import run_hook
+from electroncash.address import Address, PublicKey
+from electroncash.bitcoin import base_encode
+from electroncash.i18n import _
+from electroncash.plugins import run_hook
 
-from util import *
+from electroncash.util import bfh, Weak
+from .util import *
 
 dialogs = []  # Otherwise python randomly garbage collects the dialogs...
 
@@ -64,8 +65,9 @@ class TxDialog(QDialog, MessageBoxMixin):
         self.prompt_if_unsaved = prompt_if_unsaved
         self.saved = False
         self.desc = desc
+        self.cashaddr_signal_slots = []
 
-        self.setMinimumWidth(660)
+        self.setMinimumWidth(750)
         self.setWindowTitle(_("Transaction"))
 
         vbox = QVBoxLayout()
@@ -73,7 +75,8 @@ class TxDialog(QDialog, MessageBoxMixin):
 
         vbox.addWidget(QLabel(_("Transaction ID:")))
         self.tx_hash_e  = ButtonsLineEdit()
-        qr_show = lambda: parent.show_qrcode(str(self.tx_hash_e.text()), 'Transaction ID', parent=self)
+        weakSelfRef = Weak.ref(self)
+        qr_show = lambda: weakSelfRef() and parent.show_qrcode(str(weakSelfRef().tx_hash_e.text()), 'Transaction ID', parent=weakSelfRef())
         self.tx_hash_e.addButton(":icons/qrcode.png", qr_show, _("Show as QR code"))
         self.tx_hash_e.setReadOnly(True)
         vbox.addWidget(self.tx_hash_e)
@@ -85,12 +88,12 @@ class TxDialog(QDialog, MessageBoxMixin):
         vbox.addWidget(self.date_label)
         self.amount_label = QLabel()
         vbox.addWidget(self.amount_label)
+        self.size_label = QLabel()
+        vbox.addWidget(self.size_label)
         self.fee_label = QLabel()
         vbox.addWidget(self.fee_label)
 
         self.add_io(vbox)
-
-        vbox.addStretch(1)
 
         self.sign_button = b = QPushButton(_("Sign"))
         b.clicked.connect(self.sign)
@@ -109,7 +112,7 @@ class TxDialog(QDialog, MessageBoxMixin):
         b.setIcon(QIcon(":icons/qrcode.png"))
         b.clicked.connect(self.show_qr)
 
-        self.copy_button = CopyButton(lambda: str(self.tx), parent.app)
+        self.copy_button = CopyButton(lambda: str(weakSelfRef() and weakSelfRef().tx), parent.app)
 
         # Action buttons
         self.buttons = [self.sign_button, self.broadcast_button, self.cancel_button]
@@ -124,6 +127,19 @@ class TxDialog(QDialog, MessageBoxMixin):
         hbox.addLayout(Buttons(*self.buttons))
         vbox.addLayout(hbox)
         self.update()
+
+        # connect slots so we update in realtime as blocks come in, etc
+        parent.history_updated_signal.connect(self.update_tx_if_in_wallet)
+        parent.labels_updated_signal.connect(self.update_tx_if_in_wallet)
+        parent.network_signal.connect(self.got_verified_tx)
+
+    def got_verified_tx(self, event, args):
+        if event == 'verified' and args[0] == self.tx.txid():
+            self.update()
+
+    def update_tx_if_in_wallet(self):
+        if self.tx.txid() in self.wallet.transactions:
+            self.update()
 
     def do_broadcast(self):
         self.main_window.push_top_level_window(self)
@@ -140,57 +156,82 @@ class TxDialog(QDialog, MessageBoxMixin):
             event.ignore()
         else:
             event.accept()
-            dialogs.remove(self)
+            parent = self.main_window
+            if parent:
+                # clean up connections so window gets gc'd
+                try: parent.history_updated_signal.disconnect(self.update_tx_if_in_wallet)
+                except TypeError: pass
+                try: parent.network_signal.disconnect(self.got_verified_tx)
+                except TypeError: pass
+                try: parent.labels_updated_signal.disconnect(self.update_tx_if_in_wallet)
+                except TypeError: pass
+                for slot in self.cashaddr_signal_slots:
+                    try: parent.cashaddr_toggled_signal.disconnect(slot)
+                    except TypeError: pass
+                self.cashaddr_signal_slots = []
+
+            try:
+                dialogs.remove(self)
+            except ValueError:  # wasn't in list
+                pass
+            while True:
+                try:
+                    # Esoteric bug happens when user rejects password dialog on top of this window.. so we must keep popping self off the top_level_windows
+                    self.main_window.pop_top_level_window(self)
+                except ValueError:
+                    break
+
+    def reject(self):
+        # Override escape-key to close normally (and invoke closeEvent)
+        self.close()
 
     def show_qr(self):
-        text = str(self.tx).decode('hex')
+        text = bfh(str(self.tx))
         text = base_encode(text, base=43)
         try:
             self.main_window.show_qrcode(text, 'Transaction', parent=self)
         except Exception as e:
             self.show_message(str(e))
 
-
     def sign(self):
         def sign_done(success):
-            self.sign_button.setDisabled(False)
-            self.main_window.pop_top_level_window(self)
             if success:
                 self.prompt_if_unsaved = True
                 self.saved = False
-                self.update()
+            self.update()
+            self.main_window.pop_top_level_window(self)
 
         self.sign_button.setDisabled(True)
         self.main_window.push_top_level_window(self)
         self.main_window.sign_tx(self.tx, sign_done)
 
     def save(self):
-        name = 'signed_%s.txn' % (self.tx.hash()[0:8]) if self.tx.is_complete() else 'unsigned.txn'
+        name = 'signed_%s.txn' % (self.tx.txid()[0:8]) if self.tx.is_complete() else 'unsigned.txn'
         fileName = self.main_window.getSaveFileName(_("Select where to save your signed transaction"), name, "*.txn")
         if fileName:
+            tx_dict = self.tx.as_dict()
             with open(fileName, "w+") as f:
-                f.write(json.dumps(self.tx.as_dict(), indent=4) + '\n')
+                f.write(json.dumps(tx_dict, indent=4) + '\n')
             self.show_message(_("Transaction saved successfully"))
             self.saved = True
-
 
     def update(self):
         desc = self.desc
         base_unit = self.main_window.base_unit()
         format_amount = self.main_window.format_amount
-        tx_hash, status, label, can_broadcast, can_rbf, amount, fee, height, conf, timestamp, exp_n = self.wallet.get_tx_info(self.tx)
-
-        if can_broadcast:
-            self.broadcast_button.show()
-        else:
-            self.broadcast_button.hide()
-
-        if self.wallet.can_sign(self.tx):
-            self.sign_button.show()
-        else:
-            self.sign_button.hide()
-
+        tx_hash, status, label, can_broadcast, amount, fee, height, conf, timestamp, exp_n = self.wallet.get_tx_info(self.tx)
+        desc = label or desc
+        size = self.tx.estimated_size()
+        self.broadcast_button.setEnabled(can_broadcast)
+        can_sign = not self.tx.is_complete() and \
+            (self.wallet.can_sign(self.tx) or bool(self.main_window.tx_external_keypairs))
+        self.sign_button.setEnabled(can_sign)
         self.tx_hash_e.setText(tx_hash or _('Unknown'))
+        if fee is None:
+            try:
+                fee = self.tx.get_fee() # Try and compute fee. We don't always have 'value' in all the inputs though. :/
+            except KeyError: # Value key missing from an input
+                pass
         if desc is None:
             self.tx_desc.hide()
         else:
@@ -200,7 +241,7 @@ class TxDialog(QDialog, MessageBoxMixin):
 
         if timestamp:
             time_str = datetime.datetime.fromtimestamp(timestamp).isoformat(' ')[:-3]
-            self.date_label.setText(_("Date: %s")%time_str)
+            self.date_label.setText(_("Date: {}").format(time_str))
             self.date_label.show()
         elif exp_n:
             text = '%d blocks'%(exp_n) if exp_n > 0 else _('unknown (low fee)')
@@ -208,80 +249,95 @@ class TxDialog(QDialog, MessageBoxMixin):
             self.date_label.show()
         else:
             self.date_label.hide()
-        # if we are not synchronized, we cannot tell
-        if not self.wallet.up_to_date:
-            return
         if amount is None:
             amount_str = _("Transaction unrelated to your wallet")
         elif amount > 0:
             amount_str = _("Amount received:") + ' %s'% format_amount(amount) + ' ' + base_unit
         else:
             amount_str = _("Amount sent:") + ' %s'% format_amount(-amount) + ' ' + base_unit
-        fee_str = _("Transaction fee") + ': %s'% (format_amount(fee) + ' ' + base_unit if fee is not None else _('unknown'))
+        size_str = _("Size:") + ' %d bytes'% size
+        fee_str = _("Fee") + ': %s'% (format_amount(fee) + ' ' + base_unit if fee is not None else _('unknown'))
+        dusty_fee = self.tx.ephemeral.get('dust_to_fee', 0)
+        if fee is not None:
+            fee_str += '  ( %s ) '%  self.main_window.format_fee_rate(fee/size*1000)
+            if dusty_fee:
+                fee_str += ' <font color=#999999>' + (_("( %s in dust was added to fee )") % format_amount(dusty_fee)) + '</font>'
         self.amount_label.setText(amount_str)
         self.fee_label.setText(fee_str)
+        self.size_label.setText(size_str)
         run_hook('transaction_dialog_update', self)
 
-
     def add_io(self, vbox):
-
         if self.tx.locktime > 0:
             vbox.addWidget(QLabel("LockTime: %d\n" % self.tx.locktime))
 
         vbox.addWidget(QLabel(_("Inputs") + ' (%d)'%len(self.tx.inputs())))
 
-        ext = QTextCharFormat()
-        rec = QTextCharFormat()
-        rec.setBackground(QBrush(QColor("lightgreen")))
-        rec.setToolTip(_("Wallet receive address"))
-        chg = QTextCharFormat()
-        chg.setBackground(QBrush(QColor("yellow")))
-        chg.setToolTip(_("Wallet change address"))
-
-        def text_format(addr):
-            if self.wallet.is_mine(addr):
-                return chg if self.wallet.is_change(addr) else rec
-            return ext
-
-        def format_amount(amt):
-            return self.main_window.format_amount(amt, whitespaces = True)
-
         i_text = QTextEdit()
         i_text.setFont(QFont(MONOSPACE_FONT))
         i_text.setReadOnly(True)
-        i_text.setMaximumHeight(100)
-        cursor = i_text.textCursor()
-        for x in self.tx.inputs():
-            if x.get('is_coinbase'):
-                cursor.insertText('coinbase')
-            else:
-                prevout_hash = x.get('prevout_hash')
-                prevout_n = x.get('prevout_n')
-                cursor.insertText(prevout_hash[0:8] + '...', ext)
-                cursor.insertText(prevout_hash[-8:] + ":%-4d " % prevout_n, ext)
-                addr = x.get('address')
-                if addr == "(pubkey)":
-                    _addr = self.wallet.find_pay_to_pubkey_address(prevout_hash, prevout_n)
-                    if _addr:
-                        addr = _addr
-                if addr is None:
-                    addr = _('unknown')
-                cursor.insertText(addr, text_format(addr))
-                if x.get('value'):
-                    cursor.insertText(format_amount(x['value']), ext)
-            cursor.insertBlock()
 
         vbox.addWidget(i_text)
         vbox.addWidget(QLabel(_("Outputs") + ' (%d)'%len(self.tx.outputs())))
         o_text = QTextEdit()
         o_text.setFont(QFont(MONOSPACE_FONT))
         o_text.setReadOnly(True)
-        o_text.setMaximumHeight(100)
+        vbox.addWidget(o_text)
+        slot = partial(self.update_io, i_text, o_text)
+        self.cashaddr_signal_slots.append(slot)
+        self.main_window.cashaddr_toggled_signal.connect(slot)
+        self.update_io(i_text, o_text)
+
+    def update_io(self, i_text, o_text):
+        ext = QTextCharFormat()
+        rec = QTextCharFormat()
+        rec.setBackground(QBrush(ColorScheme.GREEN.as_color(background=True)))
+        rec.setToolTip(_("Wallet receive address"))
+        chg = QTextCharFormat()
+        chg.setBackground(QBrush(QColor("yellow")))
+        chg.setToolTip(_("Wallet change address"))
+
+        def text_format(addr):
+            if isinstance(addr, Address) and self.wallet.is_mine(addr):
+                return chg if self.wallet.is_change(addr) else rec
+            return ext
+
+        def format_amount(amt):
+            return self.main_window.format_amount(amt, whitespaces = True)
+
+        i_text.clear()
+        cursor = i_text.textCursor()
+        for x in self.tx.inputs():
+            if x['type'] == 'coinbase':
+                cursor.insertText('coinbase')
+            else:
+                prevout_hash = x.get('prevout_hash')
+                prevout_n = x.get('prevout_n')
+                cursor.insertText(prevout_hash[0:8] + '...', ext)
+                cursor.insertText(prevout_hash[-8:] + ":%-4d " % prevout_n, ext)
+                addr = x['address']
+                if isinstance(addr, PublicKey):
+                    addr = addr.toAddress()
+                if addr is None:
+                    addr_text = _('unknown')
+                else:
+                    addr_text = addr.to_ui_string()
+                cursor.insertText(addr_text, text_format(addr))
+                if x.get('value'):
+                    cursor.insertText(format_amount(x['value']), ext)
+            cursor.insertBlock()
+
+        o_text.clear()
         cursor = o_text.textCursor()
         for addr, v in self.tx.get_outputs():
-            cursor.insertText(addr, text_format(addr))
+            addrstr = addr.to_ui_string()
+            cursor.insertText(addrstr, text_format(addr))
             if v is not None:
-                cursor.insertText('\t', ext)
+                if len(addrstr) > 42: # for long outputs, make a linebreak.
+                    cursor.insertBlock()
+                    addrstr = '\u21b3'
+                    cursor.insertText(addrstr, ext)
+                # insert enough spaces until column 43, to line up amounts
+                cursor.insertText(' '*(43 - len(addrstr)), ext)
                 cursor.insertText(format_amount(v), ext)
             cursor.insertBlock()
-        vbox.addWidget(o_text)

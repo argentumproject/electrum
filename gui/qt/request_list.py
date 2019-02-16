@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 Thomas Voegtlin
@@ -23,17 +23,20 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-
-from electrum.i18n import _
-from electrum.util import block_explorer_URL, format_satoshis, format_time, age
-from electrum.plugins import run_hook
-from electrum.paymentrequest import PR_UNPAID, PR_PAID, PR_UNKNOWN, PR_EXPIRED
-from PyQt4.QtGui import *
-from PyQt4.QtCore import *
-from util import MyTreeWidget, pr_tooltips, pr_icons
+from electroncash.address import Address
+from electroncash.i18n import _
+from electroncash.util import format_time, age
+from electroncash.plugins import run_hook
+from electroncash.paymentrequest import PR_UNKNOWN
+from PyQt5.QtGui import *
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import QTreeWidgetItem, QMenu
+from .util import MyTreeWidget, pr_tooltips, pr_icons
 
 
 class RequestList(MyTreeWidget):
+    filter_columns = [0, 1, 2, 3, 4]  # Date, Account, Address, Description, Amount
+
 
     def __init__(self, parent):
         MyTreeWidget.__init__(self, parent, self.create_menu, [_('Date'), _('Address'), '', _('Description'), _('Amount'), _('Status')], 3)
@@ -46,14 +49,14 @@ class RequestList(MyTreeWidget):
     def item_changed(self, item):
         if item is None:
             return
-        if not self.isItemSelected(item):
+        if not item.isSelected():
             return
-        addr = str(item.text(1))
+        addr = item.data(0, Qt.UserRole)
         req = self.wallet.receive_requests[addr]
         expires = age(req['time'] + req['exp']) if req.get('exp') else _('Never')
         amount = req['amount']
-        message = self.wallet.labels.get(addr, '')
-        self.parent.receive_address_e.setText(addr)
+        message = self.wallet.labels.get(addr.to_storage_string(), '')
+        self.parent.receive_address_e.setText(addr.to_ui_string())
         self.parent.receive_message_e.setText(message)
         self.parent.receive_amount_e.setAmount(amount)
         self.parent.expires_combo.hide()
@@ -61,18 +64,22 @@ class RequestList(MyTreeWidget):
         self.parent.expires_label.setText(expires)
         self.parent.new_request_button.setEnabled(True)
 
-    def on_update(self):
-        self.wallet = self.parent.wallet
+    def chkVisible(self):
         # hide receive tab if no receive requests available
-        b = len(self.wallet.receive_requests) > 0
+        b = hasattr(self, 'wallet') and len(self.wallet.receive_requests) > 0 and self.parent.isVisible()
         self.setVisible(b)
         self.parent.receive_requests_label.setVisible(b)
         if not b:
             self.parent.expires_label.hide()
             self.parent.expires_combo.show()
 
+    def on_update(self):
+        self.wallet = self.parent.wallet
+        self.chkVisible()
+
         # update the receive address if necessary
-        current_address = self.parent.receive_address_e.text()
+        current_address_string = self.parent.receive_address_e.text().strip()
+        current_address = Address.from_string(current_address_string) if len(current_address_string) else None
         domain = self.wallet.get_receiving_addresses()
         addr = self.wallet.get_unused_address()
         if not current_address in domain and addr:
@@ -94,7 +101,9 @@ class RequestList(MyTreeWidget):
             signature = req.get('sig')
             requestor = req.get('name', '')
             amount_str = self.parent.format_amount(amount) if amount else ""
-            item = QTreeWidgetItem([date, address, '', message, amount_str, pr_tooltips.get(status,'')])
+            item = QTreeWidgetItem([date, address.to_ui_string(), '', message,
+                                    amount_str, pr_tooltips.get(status,'')])
+            item.setData(0, Qt.UserRole, address)
             if signature is not None:
                 item.setIcon(2, QIcon(":icons/seal.png"))
                 item.setToolTip(2, 'signed by '+ requestor)
@@ -107,15 +116,15 @@ class RequestList(MyTreeWidget):
         item = self.itemAt(position)
         if not item:
             return
-        addr = str(item.text(1))
+        addr = item.data(0, Qt.UserRole)
         req = self.wallet.receive_requests[addr]
         column = self.currentColumn()
         column_title = self.headerItem().text(column)
         column_data = item.text(column)
         menu = QMenu(self)
-        menu.addAction(_("Copy %s")%column_title, lambda: self.parent.app.clipboard().setText(column_data))
+        menu.addAction(_("Copy {}").format(column_title), lambda: self.parent.app.clipboard().setText(column_data))
         menu.addAction(_("Copy URI"), lambda: self.parent.view_and_paste('URI', '', self.parent.get_request_URI(addr)))
         menu.addAction(_("Save as BIP70 file"), lambda: self.parent.export_payment_request(addr))
-        menu.addAction(_("Delete"), lambda: self.parent.delete_payment_request(item))
+        menu.addAction(_("Delete"), lambda: self.parent.delete_payment_request(addr))
         run_hook('receive_list_menu', menu, addr)
         menu.exec_(self.viewport().mapToGlobal(position))

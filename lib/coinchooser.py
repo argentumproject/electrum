@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 kyuupichan@gmail
@@ -22,13 +22,13 @@
 # ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
 from collections import defaultdict, namedtuple
 from math import floor, log10
 
-from bitcoin import sha256, COIN, TYPE_ADDRESS
-from transaction import Transaction
-from util import NotEnoughFunds, PrintError, profiler
+from .bitcoin import sha256, COIN, TYPE_ADDRESS
+from .transaction import Transaction
+from .util import NotEnoughFunds, PrintError
+
 
 # A simple deterministic PRNG.  Used to deterministically shuffle a
 # set of coins - the same set of coins should produce the same output.
@@ -36,7 +36,6 @@ from util import NotEnoughFunds, PrintError, profiler
 # so if sending twice from the same UTXO set we choose the same UTXOs
 # to spend.  This prevents attacks on users by malicious or stale
 # servers.
-
 class PRNG:
     def __init__(self, seed):
         self.sha = sha256(seed)
@@ -63,7 +62,7 @@ class PRNG:
         return seq[self.randint(0, len(seq))]
 
     def shuffle(self, x):
-        for i in reversed(xrange(1, len(x))):
+        for i in reversed(range(1, len(x))):
             # pick an element in x[:i+1] with which to exchange x[i]
             j = self.randint(0, i+1)
             x[i], x[j] = x[j], x[i]
@@ -97,7 +96,7 @@ class CoinChooserBase(PrintError):
             value = sum(coin['value'] for coin in coins)
             return Bucket(desc, size, value, coins)
 
-        return map(make_Bucket, buckets.keys(), buckets.values())
+        return list(map(make_Bucket, buckets.keys(), buckets.values()))
 
     def penalty_func(self, tx):
         def penalty(candidate):
@@ -123,7 +122,7 @@ class CoinChooserBase(PrintError):
             s = str(val)
             return len(s) - len(s.rstrip('0'))
 
-        zeroes = map(trailing_zeroes, output_amounts)
+        zeroes = [trailing_zeroes(i) for i in output_amounts]
         min_zeroes = min(zeroes)
         max_zeroes = max(zeroes)
         zeroes = range(max(0, min_zeroes - 1), (max_zeroes + 1) + 1)
@@ -132,7 +131,7 @@ class CoinChooserBase(PrintError):
         remaining = change_amount
         amounts = []
         while n > 1:
-            average = remaining // n
+            average = remaining / n
             amount = self.p.randint(int(average * 0.7), int(average * 1.3))
             precision = min(self.p.choice(zeroes), int(floor(log10(amount))))
             amount = int(round(amount, -precision))
@@ -164,7 +163,7 @@ class CoinChooserBase(PrintError):
         self.print_error('change:', change)
         if dust:
             self.print_error('not keeping dust', dust)
-        return change
+        return change, dust
 
     def make_tx(self, coins, outputs, change_addrs, fee_estimator,
                 dust_threshold):
@@ -178,7 +177,7 @@ class CoinChooserBase(PrintError):
         self.p = PRNG(''.join(sorted(utxos)))
 
         # Copy the ouputs so when adding change we don't modify "outputs"
-        tx = Transaction.from_io([], outputs[:])
+        tx = Transaction.from_io([], outputs)
         # Size of the transaction with no inputs and no change
         base_size = tx.estimated_size()
         spent_amount = tx.output_value()
@@ -201,38 +200,17 @@ class CoinChooserBase(PrintError):
         # This takes a count of change outputs and returns a tx fee;
         # each pay-to-bitcoin-address output serializes as 34 bytes
         fee = lambda count: fee_estimator(tx_size + count * 34)
-        change = self.change_outputs(tx, change_addrs, fee, dust_threshold)
+        change, dust = self.change_outputs(tx, change_addrs, fee, dust_threshold)
         tx.add_outputs(change)
+        tx.ephemeral['dust_to_fee'] = dust
 
         self.print_error("using %d inputs" % len(tx.inputs()))
         self.print_error("using buckets:", [bucket.desc for bucket in buckets])
 
         return tx
 
-class CoinChooserOldestFirst(CoinChooserBase):
-    '''Maximize transaction priority. Select the oldest unspent
-    transaction outputs in your wallet, that are sufficient to cover
-    the spent amount. Then, remove any unneeded inputs, starting with
-    the smallest in value.
-    '''
-
-    def keys(self, coins):
-        return [coin['prevout_hash'] + ':' + str(coin['prevout_n'])
-                for coin in coins]
-
     def choose_buckets(self, buckets, sufficient_funds, penalty_func):
-        '''Spend the oldest buckets first.'''
-        # Unconfirmed coins are young, not old
-        adj_height = lambda height: 99999999 if height == 0 else height
-        buckets.sort(key = lambda b: max(adj_height(coin['height'])
-                                         for coin in b.coins))
-        selected = []
-        for bucket in buckets:
-            selected.append(bucket)
-            if sufficient_funds(selected):
-                return strip_unneeded(selected, sufficient_funds)
-        else:
-            raise NotEnoughFunds()
+        raise NotImplemented('To be subclassed')
 
 class CoinChooserRandom(CoinChooserBase):
 
@@ -247,7 +225,7 @@ class CoinChooserRandom(CoinChooserBase):
 
         # And now some random ones
         attempts = min(100, (len(buckets) - 1) * 10 + 1)
-        permutation = range(len(buckets))
+        permutation = list(range(len(buckets)))
         for i in range(attempts):
             # Get a random permutation of the buckets, and
             # incrementally combine buckets until sufficient
@@ -306,15 +284,8 @@ class CoinChooserPrivacy(CoinChooserRandom):
         return penalty
 
 
-COIN_CHOOSERS = {'Priority': CoinChooserOldestFirst,
-                 'Privacy': CoinChooserPrivacy}
-
 def get_name(config):
     kind = config.get('coin_chooser')
     if not kind in COIN_CHOOSERS:
         kind = 'Priority'
     return kind
-
-def get_coin_chooser(config):
-    klass = COIN_CHOOSERS[get_name(config)]
-    return klass()

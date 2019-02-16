@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # -*- mode: python -*-
 #
 # Electrum - lightweight Bitcoin client
@@ -24,8 +24,8 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from electrum.plugins import BasePlugin, hook
-from electrum.i18n import _
+from electroncash.plugins import BasePlugin, hook
+from electroncash.i18n import _
 
 
 class HW_PluginBase(BasePlugin):
@@ -41,7 +41,7 @@ class HW_PluginBase(BasePlugin):
         self.keystore_class.plugin = self
 
     def is_enabled(self):
-        return self.libraries_available
+        return True
 
     def device_manager(self):
         return self.parent.device_manager

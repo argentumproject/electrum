@@ -1,5 +1,5 @@
-from labels import LabelsPlugin
-from electrum.plugins import hook
+from .labels import LabelsPlugin
+from electroncash.plugins import hook
 
 class Plugin(LabelsPlugin):
 
@@ -10,5 +10,5 @@ class Plugin(LabelsPlugin):
 
     def on_pulled(self, wallet):
         self.print_error('on pulled')
-        self.window.update_tab('history')
+        self.window._trigger_update_history()
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 Thomas Voegtlin
@@ -23,23 +23,23 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from .util import *
 
-from util import *
-from electrum.i18n import _
-from electrum.util import block_explorer_URL, format_satoshis, format_time
-from electrum.plugins import run_hook
+from electroncash.i18n import _
+from electroncash.util import format_time, FileImportFailed
 
 
 class InvoiceList(MyTreeWidget):
+    filter_columns = [0, 1, 2, 3]  # Date, Requestor, Description, Amount
 
     def __init__(self, parent):
         MyTreeWidget.__init__(self, parent, self.create_menu, [_('Expires'), _('Requestor'), _('Description'), _('Amount'), _('Status')], 2)
         self.setSortingEnabled(True)
-        self.header().setResizeMode(1, QHeaderView.Interactive)
+        self.header().setSectionResizeMode(1, QHeaderView.Interactive)
         self.setColumnWidth(1, 200)
 
     def on_update(self):
-        inv_list = self.parent.invoices.sorted_list()
+        inv_list = self.parent.invoices.unpaid_invoices()
         self.clear()
         for pr in inv_list:
             key = pr.get_id()
@@ -54,22 +54,39 @@ class InvoiceList(MyTreeWidget):
             item.setFont(3, QFont(MONOSPACE_FONT))
             self.addTopLevelItem(item)
         self.setCurrentItem(self.topLevelItem(0))
-        self.setVisible(len(inv_list))
-        self.parent.invoices_label.setVisible(len(inv_list))
+        self.chkVisible(inv_list)
+
+    def chkVisible(self, inv_list=None):
+        inv_list = inv_list or self.parent.invoices.unpaid_invoices()
+        b = len(inv_list) > 0 and self.parent.isVisible()
+        self.setVisible(b)
+        self.parent.invoices_label.setVisible(b)
+
+
+    def import_invoices(self):
+        wallet_folder = self.parent.get_wallet_folder()
+        filename, __ = QFileDialog.getOpenFileName(self.parent, "Select your wallet file", wallet_folder)
+        if not filename:
+            return
+        try:
+            self.parent.invoices.import_file(filename)
+        except FileImportFailed as e:
+            self.parent.show_message(str(e))
+        self.on_update()
 
     def create_menu(self, position):
+        menu = QMenu()
         item = self.itemAt(position)
         if not item:
             return
-        key = str(item.data(0, 32).toString())
-        column = self.currentColumn()        
+        key = item.data(0, Qt.UserRole)
+        column = self.currentColumn()
         column_title = self.headerItem().text(column)
         column_data = item.text(column)
         pr = self.parent.invoices.get(key)
         status = self.parent.invoices.get_status(key)
-        menu = QMenu()
         if column_data:
-            menu.addAction(_("Copy %s")%column_title, lambda: self.parent.app.clipboard().setText(column_data))
+            menu.addAction(_("Copy {}").format(column_title), lambda: self.parent.app.clipboard().setText(column_data))
         menu.addAction(_("Details"), lambda: self.parent.show_invoice(key))
         if status == PR_UNPAID:
             menu.addAction(_("Pay Now"), lambda: self.parent.do_pay_invoice(key))

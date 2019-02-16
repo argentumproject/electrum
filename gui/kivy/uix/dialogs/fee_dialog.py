@@ -3,9 +3,8 @@ from kivy.factory import Factory
 from kivy.properties import ObjectProperty
 from kivy.lang import Builder
 
-from electrum.bitcoin import FEE_STEP, RECOMMENDED_FEE
-from electrum.util import fee_levels
-from electrum_gui.kivy.i18n import _
+from electroncash.util import fee_levels
+from electroncash_gui.kivy.i18n import _
 
 Builder.load_string('''
 <FeeDialog@Popup>
@@ -26,14 +25,7 @@ Builder.load_string('''
             range: 0, 4
             step: 1
             on_value: root.on_slider(self.value)
-        BoxLayout:
-            orientation: 'horizontal'
-            size_hint: 1, 0.5
-            Label:
-                text: _('Dynamic Fees')
-            CheckBox:
-                id: dynfees
-                on_active: root.on_checkbox(self.active)
+         
         Widget:
             size_hint: 1, 1
         BoxLayout:
@@ -59,9 +51,8 @@ class FeeDialog(Factory.Popup):
         Factory.Popup.__init__(self)
         self.app = app
         self.config = config
+        self.fee_rate = self.config.fee_per_kb()
         self.callback = callback
-        self.dynfees = self.config.get('dynamic_fees', True)
-        self.ids.dynfees.active = self.dynfees
         self.update_slider()
         self.update_text()
 
@@ -71,39 +62,20 @@ class FeeDialog(Factory.Popup):
 
     def update_slider(self):
         slider = self.ids.slider
-        if self.dynfees:
-            slider.range = (0, 4)
-            slider.step = 1
-            slider.value = self.config.get('fee_level', 2)
-        else:
-            slider.range = (FEE_STEP, 2*RECOMMENDED_FEE)
-            slider.step = FEE_STEP
-            slider.value = self.config.get('fee_per_kb', RECOMMENDED_FEE)
+        slider.range = (0, 9)
+        slider.step = 1
+        slider.value = self.config.static_fee_index(self.fee_rate)
 
     def get_fee_text(self, value):
-        if self.ids.dynfees.active:
-            tooltip = fee_levels[value]
-            if self.app.network:
-                dynfee = self.app.network.dynfee(value)
-                if dynfee:
-                    tooltip += '\n' + (self.app.format_amount_and_units(dynfee)) + '/kB'
+            fee_rate = self.config.static_fee(value)
+            tooltip = self.app.format_amount_and_units_fees(fee_rate) + '/byte'
             return tooltip
-        else:
-            return self.app.format_amount_and_units(value) + '/kB'
 
     def on_ok(self):
         value = int(self.ids.slider.value)
-        self.config.set_key('dynamic_fees', self.dynfees, False)
-        if self.dynfees:
-            self.config.set_key('fee_level', value, True)
-        else:
-            self.config.set_key('fee_per_kb', value, True)
+        self.config.set_key('fee_per_kb', self.config.static_fee(value), True)
         self.callback()
 
     def on_slider(self, value):
         self.update_text()
-
-    def on_checkbox(self, b):
-        self.dynfees = b
-        self.update_slider()
-        self.update_text()
+ 
